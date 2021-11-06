@@ -21,7 +21,7 @@
 
   :aliases {"all" ["with-profile" "dev:dev,1.7:dev,1.9:dev,1.10:dev,1.11"]
             "deploy" ["do" "clean," "deploy" "clojars"]
-            "test" ["do" "clean," "test," "with-profile" "dev" "doo" "node" "test" "once"]}
+            "test" ["do" "clean," "test," "doo" "node" "test" "once"]}
 
   :jar-exclusions [#"\.swp|\.swo|\.DS_Store"]
 
