@@ -75,7 +75,7 @@
    See the docstrings of defrecord, fn, and defn for more details about how
    to use these macros."
   ;; don't exclude def because it's not a var.
-  (:refer-clojure :exclude [Keyword Symbol Inst atom defrecord defn letfn defmethod fn MapEntry ->MapEntry])
+  (:refer-clojure :exclude [Keyword Symbol Inst atom defrecord defn letfn defmethod fn MapEntry ->MapEntry seqable?])
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
@@ -943,6 +943,51 @@
      "schema that will match the remaining elements.")
     [(concat required optional) (first more)]))
 
+(clojure.core/defn sequence-schema-elements
+  [[singles multi]]
+  (reduce
+    (clojure.core/fn [more ^One s]
+      (if-not (.-optional? s)
+        (cons
+          (collection/one-element
+            true (named (.-schema s) (.-name s))
+            (clojure.core/fn [item-fn x]
+              (if-let [x (seq x)]
+                (do (item-fn (first x))
+                    (rest x))
+                (do (item-fn
+                      (macros/validation-error
+                        (.-schema s) ::missing
+                        (list 'present? (.-name s))))
+                    nil))))
+          more)
+        [(collection/optional-tail
+           (named (.-schema s) (.-name s))
+           (clojure.core/fn [item-fn x]
+             (when-let [x (seq x)]
+               (item-fn (first x))
+               (rest x)))
+           more)]))
+    (when multi
+      [(collection/all-elements multi)])
+    (reverse singles)))
+
+(clojure.core/defn sequence-schema-on-error
+  [_ elts extra]
+  (let [head (mapv utils/error-val elts)]
+    (if (seq extra)
+      (conj head (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra)))))
+      head)))
+
+(clojure.core/defn sequence-schema-explain
+  [[singles multi]]
+  (vec
+    (concat
+      (for [^One s singles]
+        (list (if (.-optional? s) 'optional 'one) (explain (:schema s)) (:name s)))
+      (when multi
+        [(explain multi)]))))
+
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentVector
      :cljs cljs.core.PersistentVector)
@@ -953,52 +998,49 @@
       (clojure.core/fn [x] (or (nil? x) (sequential? x) #?(:clj (instance? java.util.List x))))
       #(list 'sequential? %))
      vec
-     (let [[singles multi] (parse-sequence-schema this)]
-       (reduce
-        (clojure.core/fn [more ^One s]
-          (if-not (.-optional? s)
-            (cons
-             (collection/one-element
-              true (named (.-schema s) (.-name s))
-              (clojure.core/fn [item-fn x]
-                (if-let [x (seq x)]
-                  (do (item-fn (first x))
-                      (rest x))
-                  (do (item-fn
-                       (macros/validation-error
-                        (.-schema s) ::missing
-                        (list 'present? (.-name s))))
-                      nil))))
-             more)
-            [(collection/optional-tail
-              (named (.-schema s) (.-name s))
-              (clojure.core/fn [item-fn x]
-                (when-let [x (seq x)]
-                  (item-fn (first x))
-                  (rest x)))
-              more)]))
-        (when multi
-          [(collection/all-elements multi)])
-        (reverse singles)))
-     (clojure.core/fn [_ elts extra]
-       (let [head (mapv utils/error-val elts)]
-         (if (seq extra)
-           (conj head (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra)))))
-           head)))))
+     (-> this parse-sequence-schema sequence-schema-elements)
+     sequence-schema-on-error))
   (explain [this]
-    (let [[singles multi] (parse-sequence-schema this)]
-      (vec
-       (concat
-        (for [^One s singles]
-          (list (if (.-optional? s) 'optional 'one) (explain (:schema s)) (:name s)))
-        (when multi
-          [(explain multi)]))))))
+    (-> this parse-sequence-schema sequence-schema-explain)))
 
 (clojure.core/defn pair
   "A schema for a pair of schemas and their names"
   [first-schema first-name second-schema second-name]
   [(one first-schema first-name)
    (one second-schema second-name)])
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Seqable Schemas
+
+(def ^:private seqable? (or (some-> (resolve 'clojure.core/seqable?) deref)
+                            #?(;;https://github.com/clojure/clojure/blob/master/src/jvm/clojure/lang/RT.java#L561-L569
+                               :clj (fn [v]
+                                      (or (instance? clojure.lang.ISeq v)
+                                          (instance? clojure.lang.Seqable v)
+                                          (nil? v)
+                                          (instance? Iterable v)
+                                          (.isArray (class v))
+                                          (instance? CharSequence v)
+                                          (instance? java.util.Map v)))
+                               ;;https://github.com/clojure/clojurescript/blob/76ac6bf41300f821f052d03537edf7e86694fc6d/src/main/cljs/cljs/core.cljs#L2257-L2264
+                               :cljs (fn [v]
+                                       (or (nil? s)
+                                           (satisfies? ISeqable s)
+                                           (array? s)
+                                           (string? s))))))
+
+(clojure.core/defrecord SeqableSchema [schemas]
+  Schema
+  (spec [this]
+    (collection/collection-spec
+      (spec/simple-precondition this seqable?)
+      vec
+      (-> this parse-sequence-schema sequence-schema-elements)
+      (clojure.core/fn [_ xs _] (vec (keep utils/error-val xs)))))
+  (explain [this] (list* 'seqable (-> schemas parse-sequence-schema sequence-schema-explain))))
+
+(clojure.core/defn seqable [& schemas]
+  (->SeqableSchema schemas))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Record Schemas
