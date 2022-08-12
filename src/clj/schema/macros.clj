@@ -414,12 +414,13 @@
 ;;; Public: helpers for schematized functions
 
 (defn extract-leading-fn-kv-pairs
+  "Split list into a map of keys allowed at the beginning
+  of a schema fn macro (eg., :all), and the rest."
   [macro-args]
   (loop [[k & [v & next-macro-args :as v-provided] :as macro-args] macro-args
          leading-opts {}]
-    (if (keyword? k)
-      (do (assert! (= :all k) (str "Invalid option: " k))
-          (assert! v-provided (str "Missing value for key " k))
+    (if (= :all k)
+      (do (assert! v-provided (str "Missing value for key " k))
           (recur next-macro-args (assoc leading-opts k v)))
       [leading-opts macro-args])))
 

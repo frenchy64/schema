@@ -1576,6 +1576,10 @@
         (is (re-find #"ef408750"
                      (#?(:cljs .-message :clj .getMessage) e)))))))
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Polymorphic schemas
+
 (deftest explain-all-test
   (is (= '(all [x] (s/=> x)) (s/explain (s/all [x] (s/=> x))))))
 
@@ -1593,6 +1597,7 @@
                  s/Int s/Bool)
          (s/=> s/Int s/Bool s/Int s/Bool))))
 
-(s/defn :all [T]
-  identity :- T
-  [])
+(s/defn ;:all [T]
+  poly-identity :- T
+  [x :- T]
+  x)
