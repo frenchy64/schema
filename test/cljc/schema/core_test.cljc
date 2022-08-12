@@ -1597,7 +1597,16 @@
                  s/Int s/Bool)
          (s/=> s/Int s/Bool s/Int s/Bool))))
 
-(s/defn ;:all [T]
+(deftest poly-defn-test
+  #?(:clj (is (thrown? Exception
+                       (eval `(s/defn :all [~'x]
+                                ~'distinct-vars-error :- ~'x
+                                [~'x :- ~'x]
+                                ~'x))))))
+
+;; TODO test s/defn, s/fn, s/letfn
+
+(s/defn :all [T]
   poly-identity :- T
   [x :- T]
-  x)
+  (s/validate T x))

@@ -249,7 +249,7 @@
   ([env fn-name output-schema-sym bind-meta arity-form]
    (process-fn-arity {:env env :fn-name fn-name :output-schema-sym output-schema-sym
                       :bind-meta bind-meta :arity-form arity-form :ufv-sym 'ufv__}))
-  ([{[bind & body] :arity-form :keys [env fn-name output-schema-sym bind-meta ufv-sym]}]
+  ([{[bind & body] :arity-form :keys [env fn-name output-schema-sym bind-meta ufv-sym poly-binder]}]
    (assert! (vector? bind) "Got non-vector binding form %s" bind)
    (when-let [bad-meta (seq (filter (or (meta bind) {}) [:tag :s? :s :schema]))]
      (throw (RuntimeException. (str "Meta not supported on bindings, put on fn name" (vec bad-meta)))))
@@ -323,7 +323,8 @@
                       {})
         ufv-sym (gensym "ufv")
         processed-arities (map #(process-fn-arity {:env env :fn-name name :output-schema-sym output-schema-sym
-                                                   :bind-meta bind-meta :arity-form % :ufv-sym ufv-sym})
+                                                   :bind-meta bind-meta :arity-form % :ufv-sym ufv-sym
+                                                   :poly-binder binder})
                                (if (vector? (first fn-body))
                                  [fn-body]
                                  fn-body))

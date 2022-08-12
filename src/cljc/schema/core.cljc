@@ -1400,20 +1400,20 @@
    See (doc schema.core) for details of the :- syntax for arguments and return
    schemas.
 
-   You can use :all to make a polymorphic schema. Variables will only be in scope in the
-   :- positions, not the function body.
+   You can use :all to make a polymorphic schema. Schema variables will be in scope
+   in the function body, but will be bound to their most general values (eg., s/Any)
+   at runtime. This also informs how `s/with-fn-validation` treats schema variables.
+
+   Parameter and schema variable names must be distinct.
 
    (s/defn :all [T]
     my-identity :- T
     [x :- T]
-    ;; cannot refer to T from here
-    x)
+    ;; the same as (s/validate s/Any x) --- useful for documentation purposes
+    (s/validate T x))
 
    (s/fn-schema my-identity)
    ==> (all [T] (=> T T))
-
-   Runtime checking for polymorphic functions works by first instantiating each variable
-   to s/Any and using the resulting schema to check the arg/return.
 
    The overhead for checking if run-time validation should be used is very
    small -- about 5% of a very small fn call.  On top of that, actual
