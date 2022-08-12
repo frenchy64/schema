@@ -14,10 +14,7 @@
   (is (= (macros/extract-leading-fn-kv-pairs [:- '[s/Any] :- 'schema])
          [{} [:- '[s/Any] :- 'schema]]))
   (is (= (macros/extract-leading-fn-kv-pairs [:all '[x] :- '[s/Any] :- 'schema])
-         [{:all '[x]} [:- '[s/Any] :- 'schema]]))
-  (is (thrown-with-msg? Exception
-                        #"Invalid option: :bad"
-                        (macros/extract-leading-fn-kv-pairs [:bad '[x] 'name :- 'schema]))))
+         [{:all '[x]} [:- '[s/Any] :- 'schema]])))
 
 (deftest normalized-defn-args-test
   (doseq [explicit-meta [{} {:a -1 :c 3}]
