@@ -316,6 +316,7 @@
   (let [compile-validation (compile-fn-validation? env name)
         output-schema (extract-schema-form name)
         output-schema-sym (gensym "output-schema")
+        binder (-> name meta ::binder)
         bind-meta (or (when-let [t (:tag (meta name))]
                         (when (primitive-sym? t)
                           {:tag t}))
@@ -336,9 +337,12 @@
                            (mapcat :more-bindings processed-arities)))
      :arglists (map :arglist processed-arities)
      :raw-arglists (map :raw-arglist processed-arities)
-     :schema-form (if (= 1 (count processed-arities))
-                    `(schema.core/->FnSchema ~output-schema-sym ~[(ffirst schema-bindings)])
-                    `(schema.core/make-fn-schema ~output-schema-sym ~(mapv first schema-bindings)))
+     :schema-form (let [fn-schema-form (if (= 1 (count processed-arities))
+                                         `(schema.core/->FnSchema ~output-schema-sym ~[(ffirst schema-bindings)])
+                                         `(schema.core/make-fn-schema ~output-schema-sym ~(mapv first schema-bindings)))]
+                    (if binder
+                      `(schema.core/all ~binder ~fn-schema-form)
+                      fn-schema-form))
      :fn-body fn-forms}))
 
 (defn parse-arity-spec
@@ -409,6 +413,16 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public: helpers for schematized functions
 
+(defn extract-leading-fn-kv-pairs
+  [macro-args]
+  (loop [[k & [v & next-macro-args :as v-provided] :as macro-args] macro-args
+         leading-opts {}]
+    (if (keyword? k)
+      (do (assert! (= :all k) (str "Invalid option: " k))
+          (assert! v-provided (str "Missing value for key " k))
+          (recur next-macro-args (assoc leading-opts k v)))
+      [leading-opts macro-args])))
+
 (defn normalized-defn-args
   "Helper for defining defn-like macros with schemas.  Env is &env
    from the macro body.  Reads optional docstring, return type and
@@ -416,11 +430,13 @@
    returning the normalized arglist.  Based on
    clojure.tools.macro/name-with-attributes."
   [env macro-args]
-  (let [[name macro-args] (extract-arrow-schematized-element env macro-args)
+  (let [[leading-opts macro-args] (extract-leading-fn-kv-pairs macro-args)
+        [name macro-args] (extract-arrow-schematized-element env macro-args)
         [maybe-docstring macro-args] (maybe-split-first string? macro-args)
         [maybe-attr-map macro-args] (maybe-split-first map? macro-args)]
     (cons (vary-meta name merge
                      (or maybe-attr-map {})
+                     (when (:all leading-opts) {::binder (:all leading-opts)})
                      (when maybe-docstring {:doc maybe-docstring}))
           macro-args)))
 

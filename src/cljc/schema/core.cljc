@@ -1066,6 +1066,53 @@
   ([klass schema map-constructor]
      `(record* ~klass ~schema #(~map-constructor (into {} %))))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Polymorphic Schemas
+
+
+(declare maybe-inst-any)
+
+(macros/defrecord-schema PolySchema [decl schema-form inst->schema] ;; input-schemas sorted by arity
+  Schema
+  (spec [this] (spec (maybe-inst-any this)))
+  (explain [this] (list 'all decl schema-form)))
+
+(clojure.core/defn inst
+  "Instantiate a polymorphic schema with schemas."
+  [for-all-schema & schemas]
+  {:pre [(instance? PolySchema for-all-schema)]}
+  (apply (:inst->schema for-all-schema) schemas))
+
+(defn- most-general-insts [=>-schema]
+  {:pre [(instance? PolySchema =>-schema)]}
+  (mapv (clojure.core/fn [a]
+          {:pre [(symbol? a)
+                 (not (namespace a))]}
+          (if (-> a meta :nat)
+            :any-nat
+            Any))
+        (:decl =>-schema)))
+
+(defn- maybe-inst-any [=>-schema]
+  (if (instance? PolySchema =>-schema)
+    (apply inst =>-schema (most-general-insts =>-schema))
+    =>-schema))
+ 
+(clojure.core/defn poly-schema? [v]
+  (instance? PolySchema v))
+
+(defmacro all
+  "Create a polymorphic function schema.
+
+  s/validate's as wrapped schema with each decl instantiated with Any."
+  [decl schema]
+  {:pre [(vector? decl)
+         (every? (every-pred symbol? (complement namespace)) decl)]}
+  `(->PolySchema
+     '~decl
+     '~schema
+     (clojure.core/fn ~decl ~schema)))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Function Schemas
@@ -1240,7 +1287,7 @@
    all forms have been executed, resets function validation to its
    previously set value. Not concurrency-safe."
   [& body]
-  `(let [body# (fn [] ~@body)]
+  `(let [body# (clojure.core/fn [] ~@body)]
      (if (fn-validation?)
        (body#)
        (do
@@ -1254,7 +1301,7 @@
    all forms have been executed, resets function validation to its
    previously set value. Not concurrency-safe."
   [& body]
-  `(let [body# (fn [] ~@body)]
+  `(let [body# (clojure.core/fn [] ~@body)]
      (if (fn-validation?)
        (do
          (set-fn-validation! false)
@@ -1282,7 +1329,7 @@
   [f schema]
   (vary-meta f assoc :schema schema))
 
-(clojure.core/defn ^FnSchema fn-schema
+(clojure.core/defn fn-schema
   "Produce the schema for a function defined with s/fn or s/defn."
   [f]
   (macros/assert! (fn? f) "Non-function %s" (utils/type-of f))
@@ -1313,10 +1360,12 @@
              up to 20 arguments, and then via `apply` beyond 20 arguments.
              See `cljs.core/with-meta` and `cljs.core.MetaFn`."
   [& fn-args]
-  (let [fn-args (if (symbol? (first fn-args))
+  (let [[leading-opts fn-args] (macros/extract-leading-fn-kv-pairs fn-args)
+        fn-args (if (symbol? (first fn-args))
                   fn-args
                   (cons (gensym "fn") fn-args))
         [name more-fn-args] (macros/extract-arrow-schematized-element &env fn-args)
+        name (vary-meta name merge leading-opts)
         {:keys [outer-bindings schema-form fn-body]} (macros/process-fn- &env name more-fn-args)]
     `(let [~@outer-bindings
            ;; let bind to work around https://clojure.atlassian.net/browse/CLJS-968
@@ -1350,6 +1399,21 @@
 
    See (doc schema.core) for details of the :- syntax for arguments and return
    schemas.
+
+   You can use :all to make a polymorphic schema. Variables will only be in scope in the
+   :- positions, not the function body.
+
+   (s/defn :all [T]
+    my-identity :- T
+    [x :- T]
+    ;; cannot refer to T from here
+    x)
+
+   (s/fn-schema my-identity)
+   ==> (all [T] (=> T T))
+
+   Runtime checking for polymorphic functions works by first instantiating each variable
+   to s/Any and using the resulting schema to check the arg/return.
 
    The overhead for checking if run-time validation should be used is very
    small -- about 5% of a very small fn call.  On top of that, actual
@@ -1387,7 +1451,7 @@
         {:keys [outer-bindings schema-form fn-body arglists raw-arglists]} (macros/process-fn- &env name more-defn-args)]
     `(let ~outer-bindings
        (let [ret# (clojure.core/defn ~(with-meta name {})
-                    ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
+                    ~(assoc (apply dissoc standard-meta ::macros/binder (when (macros/primitive-sym? tag) [:tag]))
                        :doc (str
                              (str "Inputs: " (if (= 1 (count raw-arglists))
                                                (first raw-arglists)
@@ -1442,8 +1506,10 @@
   (let [{:keys [outer-bindings
                 fnspecs
                 inner-bindings]}
-        (reduce (fn [acc fnspec]
-                  (let [[name more-fn-args] (macros/extract-arrow-schematized-element &env fnspec)
+        (reduce (clojure.core/fn [acc fnspec]
+                  (let [[leading-opts fnspec] (macros/extract-leading-fn-kv-pairs fnspec)
+                        [name more-fn-args] (macros/extract-arrow-schematized-element &env fnspec)
+                        name (vary-meta name merge leading-opts)
                         {:keys [outer-bindings schema-form fn-body]} (macros/process-fn- &env name more-fn-args)]
                     (-> acc
                         (update :outer-bindings into outer-bindings)

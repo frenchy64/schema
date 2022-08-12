@@ -1575,3 +1575,24 @@
       (catch Exception e
         (is (re-find #"ef408750"
                      (#?(:cljs .-message :clj .getMessage) e)))))))
+
+(deftest explain-all-test
+  (is (= '(all [x] (s/=> x)) (s/explain (s/all [x] (s/=> x))))))
+
+(deftest inst-test
+  (is (= (s/inst (s/all [a] (s/=> a))
+                 s/Int)
+         (s/=> s/Int)))
+  (is (not= (s/inst (s/all [a] (s/=> a))
+                    s/Bool)
+            (s/=> s/Int)))
+  (is (= (s/inst (s/all [a] (s/=> a a))
+                 s/Int)
+         (s/=> s/Int s/Int)))
+  (is (= (s/inst (s/all [a b] (s/=> a b a b))
+                 s/Int s/Bool)
+         (s/=> s/Int s/Bool s/Int s/Bool))))
+
+(s/defn :all [T]
+  identity :- T
+  [])
