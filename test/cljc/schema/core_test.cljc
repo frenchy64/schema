@@ -11,11 +11,13 @@
   #?(:cljs (:use-macros
              [cljs.test :only [is deftest testing are]]
              [schema.test-macros :only [valid! invalid! invalid-call! is-assert!]]))
-  #?(:cljs (:require-macros [schema.macros :as macros]))
+  #?(:cljs (:require-macros [clojure.template :refer [do-template]]
+                            [schema.macros :as macros]))
   (:require
    [clojure.string :as str]
    [#?(:clj clojure.pprint
        :cljs cljs.pprint) :as pprint]
+   #?(:clj [clojure.template :refer [do-template]])
    clojure.data
    [schema.utils :as utils]
    [schema.core :as s]
@@ -696,6 +698,18 @@
     (valid! schema (fn [])) ;; we don't actually validate what the function does
     (valid! schema {})
     (is (= '(=>* Keyword [Int] [Int & [Keyword]]) (s/explain schema)))))
+
+(deftest dotted-fn-schema-test
+  (testing "expand dotted template"
+    (let [X [s/Int s/Bool]
+          schema (s/=> s/Keyword s/Int s/Int [X] :.. X)]
+      (is (= (s/=> s/Keyword s/Int s/Int [s/Int] [s/Bool])
+             schema))))
+  (testing "expand AnyDotted"
+    (let [X (s/->AnyDotted s/Int)
+          schema (s/=> s/Keyword s/Int s/Int [X] :.. X)]
+      (is (= (s/=> s/Keyword s/Int s/Int & [[s/Int]])
+             schema)))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1505,7 +1519,7 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;  Helpers for defining schemas (used in in-progress work, expanlation coming soon)
+;;;  Helpers for defining schemas (used in in-progress work, explanation coming soon)
 
 (s/defschema TestFoo {:bar s/Str})
 
@@ -1575,3 +1589,373 @@
       (catch Exception e
         (is (re-find #"ef408750"
                      (#?(:cljs .-message :clj .getMessage) e)))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; s/defprotocol
+
+(defprotocol ProtAssumptions
+  (prot-assumptions [this a] [this a b] "foo"))
+
+(s/defprotocol PDefProtocolTest1
+  "Doc"
+  (defprotocoltest1-method1
+    :- s/Str
+    ;; IMPORTANT don't remove arities, specifically tests 2 arities
+    [this a :- s/Int]
+    [this a :- s/Int, b :- s/Any]
+    "doc 1")
+  (defprotocoltest1-method2
+    :- s/Str
+    ;; IMPORTANT don't add arities, specifically tests 1 arity
+    [this a :- s/Int, b :- s/Any]
+    "doc 2"))
+
+(defrecord ImplementsPDefProtocolTest1 []
+  PDefProtocolTest1
+  (defprotocoltest1-method1
+    [this a]
+    :a))
+
+#?(:bb nil ;;https://github.com/babashka/babashka/issues/1339
+   :clj
+   (deftest protocol-in-another-ns
+     (binding [*ns* *ns*]
+       (eval `(ns ~(gensym)))
+       (is (= :a (eval `(defprotocoltest1-method1 (ImplementsPDefProtocolTest1.) 1)))))))
+
+(deftest protocol-assumptions-test
+  #?(:clj
+     (testing "methods never have :inline meta by default"
+       (is (= {}
+              (-> (var prot-assumptions)
+                  meta
+                  (select-keys [:inline :inline-arities]))))))
+  #?(:cljs
+     (testing ":protocol meta on method vars is the protocol name"
+       (testing "cc/defprotocol"
+         (is (= `ProtAssumptions
+                (-> (var prot-assumptions)
+                    meta
+                    :protocol))))
+       (testing "s/defprotocol"
+         (is (= `PDefProtocolTest1
+                (-> (var defprotocoltest1-method1)
+                    meta
+                    :protocol))))))
+  #?(:bb nil ;;https://github.com/babashka/babashka/issues/1340
+     :default (testing ":doc meta on method vars"
+                (testing "cc/defprotocol"
+                  (is (= "foo"
+                         (-> (var prot-assumptions)
+                             meta
+                             :doc))))
+                (testing "cc/defprotocol"
+                  (is (str/ends-with?
+                        (-> (var defprotocoltest1-method1)
+                            meta
+                            :doc)
+                        "doc 1"))))))
+
+(deftype TDefProtocolTest1 []
+  PDefProtocolTest1
+  (defprotocoltest1-method1 [this a] (str a))
+  (defprotocoltest1-method1 [this a b] b)
+  (defprotocoltest1-method2 [this a b] b))
+
+(s/defprotocol PDefProtocolTestDefault
+  ;; test two arities
+  (pdefprotocol-test-default1 :- s/Str
+    [this a :- s/Int]
+    [this a :- s/Int, b :- s/Any])
+  ;; test single arity
+  (pdefprotocol-test-default2 :- s/Str
+    [this a :- s/Int, b :- s/Any]))
+
+(extend-protocol PDefProtocolTestDefault
+  #?(:clj Object
+     ;; default stored in "_" field of protocol method
+     :cljs default)
+  (pdefprotocol-test-default1
+    ([this a] (str a))
+    ([this a b] b))
+  (pdefprotocol-test-default2 [this a b] b))
+
+(deftest sdefprotocol-test
+  (do-template
+    [WRAP] (testing (pr-str 'WRAP)
+             (WRAP
+               (is (= "1" (defprotocoltest1-method1 (->TDefProtocolTest1) 1)))
+               (testing "default dispatch"
+                 (is (= "1" (pdefprotocol-test-default1 :foo 1)))
+                 (is (= "1" (pdefprotocol-test-default1 :foo 1 "1")))
+                 (is (= "2" (pdefprotocol-test-default1 "str" 2)))
+                 (is (= "2" (pdefprotocol-test-default1 "str" 2 "2")))
+                 (is (= "3" (pdefprotocol-test-default1 'a 3)))
+                 (is (= "3" (pdefprotocol-test-default1 'a 3 "3"))))))
+    do
+    s/with-fn-validation
+    s/without-fn-validation)
+  (testing "metadata"
+    (is (= "Doc" (-> #'PDefProtocolTest1 meta :doc)))
+    #?(:bb nil ;;https://github.com/babashka/babashka/issues/1340
+       :clj (is (= "doc 1" (-> #'defprotocoltest1-method1 meta :doc))))
+    #?(:bb nil ;;https://github.com/babashka/babashka/issues/1340
+       :clj (is (= "doc 2" (-> #'defprotocoltest1-method2 meta :doc))))
+    (is (= (s/=>* s/Str [s/Any s/Int] [s/Any s/Int s/Any])
+           (s/fn-schema defprotocoltest1-method1)))
+    #?(:clj (is (= (s/=>* s/Str [s/Any s/Int] [s/Any s/Int s/Any])
+                   (-> #'defprotocoltest1-method1 meta :schema)))))
+  #_ ;; :inline metatdata on methods we add to prevent inlining thwarts this compile-time error
+  #?(:clj
+     (is (thrown-with-msg?
+           Exception #"No single method"
+           (eval `#(defprotocoltest1-method1 (->TDefProtocolTest1))))))
+  #?(:bb nil
+     :default (testing "default method errors"
+                (s/with-fn-validation
+                  (invalid-call! pdefprotocol-test-default1 :foo nil) ;;input
+                  (invalid-call! pdefprotocol-test-default1 :foo nil "a") ;;input
+                  (invalid-call! pdefprotocol-test-default1 :foo 1 :a) ;;output
+                  (invalid-call! pdefprotocol-test-default1 "str" :foo) ;;input
+                  (invalid-call! pdefprotocol-test-default1 "str" :foo :a) ;;input
+                  (invalid-call! pdefprotocol-test-default1 "str" 1 :a)))) ;;output
+  (testing "inlinable positions"
+    (s/with-fn-validation
+      (is (= "1" (defprotocoltest1-method1 (->TDefProtocolTest1) 1)))
+      (is (= "a" (defprotocoltest1-method1 (->TDefProtocolTest1) 1 "a")))
+      (is (= "a" (defprotocoltest1-method2 (->TDefProtocolTest1) 1 "a"))))
+    #?(:bb nil
+       :default (s/with-fn-validation
+                  (invalid-call! defprotocoltest1-method1 (->TDefProtocolTest1) :a)
+                  (testing "input"
+                    (invalid-call! defprotocoltest1-method1 (->TDefProtocolTest1) ::foo "a"))
+                  (testing "output"
+                    (invalid-call! defprotocoltest1-method1 (->TDefProtocolTest1) 1 ::foo))
+                  (invalid-call! defprotocoltest1-method2 (->TDefProtocolTest1) 1 ::foo)))
+    ;; try a bunch of contexts and nestings to make sure inlining is defeated
+    #?(:bb nil
+       :clj 
+       (do
+         (s/with-fn-validation
+           (invalid-call! (eval `(defprotocoltest1-method1 (->TDefProtocolTest1) :a))))
+         (s/with-fn-validation
+           (invalid-call! (eval `(let [] (defprotocoltest1-method1 (->TDefProtocolTest1) :a)))))))))
+
+#?(:clj
+   (s/defprotocol ProtocolCache
+     (protocol-cache [this])))
+
+#?(:clj
+   (deftest clj-protocol-cache-test
+     ;; make test repeatable
+     (alter-var-root #'ProtocolCache dissoc :impls)
+     (let [x 1
+           ;; use partial to hold onto method reference. this acts differently
+           ;; with cc/defprotocol because of CLJ-1796 (cache is never invalidated
+           ;; on old references).
+           call (partial protocol-cache x)]
+       (extend-protocol ProtocolCache
+         Number
+         (protocol-cache [_] :number))
+       (is (= :number (protocol-cache x) (call)))
+       (extend-protocol ProtocolCache
+         Long
+         (protocol-cache [_] :long))
+       (testing "invalidates .__methodImplCache"
+         (is (= :long (protocol-cache x) (call)))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Polymorphic schemas
+
+(s/defschema PolySemanticsTestSuite
+  {:args-shadow-schema-variables (s/all [x] (s/=> x x))
+   :poly-identity (s/all [T] (s/=> T T))
+   :poly-first (s/all [T] (s/=> T [T]))
+   :poly-map-nodot (s/all [X Y] (s/=> [Y] (s/=> Y X) [X]))
+   :poly-map-dot (s/all [X Y :.. Z] (s/=> [Z] (s/=> Z X Y :.. Y) [X] [Y] :.. Y))
+   :poly-map-dot-arities (s/all [X Y Z S :.. T]
+                                (s/=>* [T]
+                                       [(s/=> T X)             [X]]
+                                       [(s/=> T X Y)           [X] [Y]]
+                                       [(s/=> T X Y Z)         [X] [Y] [Z]]
+                                       [(s/=> T X Y Z S :.. S) [X] [Y] [Z] [S] :.. S]))})
+
+(s/defn ^:always-validate poly-semantics-test-suite
+  [{:keys [args-shadow-schema-variables
+           poly-identity
+           poly-first
+           poly-map-nodot
+           poly-map-dot
+           poly-map-dot-arities]} :- PolySemanticsTestSuite]
+  (is (= 1 (s/with-fn-validation (args-shadow-schema-variables 1))))
+  (is (= 1 (s/with-fn-validation (poly-identity 1))))
+  (is (= :a (s/with-fn-validation (poly-identity :a))))
+  (s/with-fn-validation (invalid-call! poly-first 1))
+  (is (= 1 (s/with-fn-validation (poly-first [1]))))
+  (is (= 1 (s/with-fn-validation (poly-first [1]))))
+  (is (= [2 3] (s/with-fn-validation (poly-map-nodot inc [1 2]))))
+  (s/with-fn-validation (invalid-call! poly-map-nodot 1 2))
+  (is (= [2 3] (s/with-fn-validation (poly-map-dot inc [1 2]))))
+  (is (= [3 5] (s/with-fn-validation (poly-map-dot + [1 2] [2 3]))))
+  (s/with-fn-validation (invalid-call! poly-map-dot 1 2))
+  (s/with-fn-validation (invalid-call! poly-map-dot + 1))
+  (s/with-fn-validation (invalid-call! poly-map-dot + [1] 2))
+  (is (= [2 3] (s/with-fn-validation (poly-map-dot-arities inc [1 2]))))
+  (is (= [3 5] (s/with-fn-validation (poly-map-dot-arities + [1 2] [2 3]))))
+  (is (= [7 10] (s/with-fn-validation (poly-map-dot-arities + [1 2] [2 3] [4 5]))))
+  (is (= [13 17] (s/with-fn-validation (poly-map-dot-arities + [1 2] [2 3] [4 5] [6 7]))))
+  (is (= [21 26] (s/with-fn-validation (poly-map-dot-arities + [1 2] [2 3] [4 5] [6 7] [8 9]))))
+  (s/with-fn-validation (invalid-call! poly-map-dot-arities 1 1))
+  (s/with-fn-validation (invalid-call! poly-map-dot-arities + 1))
+  (s/with-fn-validation (invalid-call! poly-map-dot-arities + [1] 2))
+  (s/with-fn-validation (invalid-call! poly-map-dot-arities + [1] [2] 3))
+  (s/with-fn-validation (invalid-call! poly-map-dot-arities + [1] [2] [3] 4))
+  (s/with-fn-validation (invalid-call! poly-map-dot-arities + [1] [2] [3] [4] 5)))
+
+(s/defn :all [x]
+  args-shadow-schema-variables :- x
+  [x :- x]
+  x)
+
+(s/defn :all [T]
+  poly-identity :- T
+  [x :- T]
+  (s/validate T x))
+
+(s/defn :all [T]
+  poly-first :- T
+  [xs :- [T]]
+  (first xs))
+
+#_ ;;TODO
+(s/defn :all [T ;TODO :- [:=> :schema :schema :schema]
+              ]
+  ho-schema-fn :- T
+  [xs :- (T s/Int s/Bool)]
+  (first xs))
+
+(s/defn :all [X Y]
+  poly-map-nodot :- [Y]
+  [f :- (s/=> Y X)
+   xs :- [X]]
+  (map f xs))
+
+(s/defn :all [X Y :.. Z]
+  poly-map-dot :- [Z]
+  [f :- (s/=> Z X Y :.. Y)
+   xs :- [X]
+   & yss :- [Y] :.. Y]
+  (apply map f xs yss))
+
+(s/defn :all [X Y Z S :.. T]
+  poly-map-dot-arities :- [T]
+  ([f :- (s/=> T X)
+    xs :- [X]]
+   (map f xs))
+  ([f :- (s/=> T X Y)
+    xs :- [X]
+    ys :- [Y]]
+   (map f xs ys))
+  ([f :- (s/=> T X Y Z)
+    xs :- [X]
+    ys :- [Y]
+    zs :- [Z]]
+   (map f xs ys zs))
+  ([f :- (s/=> T X Y Z S :.. S)
+    xs :- [X]
+    ys :- [Y]
+    zs :- [Z]
+    & ss :- [S] :.. S]
+   (apply map f xs ys zs ss)))
+
+(deftest explain-all-test
+  (is (= '(all [x] (s/=> x)) (s/explain (s/all [x] (s/=> x)))))
+  ;;FIXME ideally (all [T] (s/=> T))
+  (is (= '(all [T] (schema.core/->FnSchema T [[(schema.core/one T (quote x))]]))
+         (s/explain (s/fn-schema poly-identity)))))
+
+(deftest inst-test
+  (is (= (@#'s/instantiate (s/all [a] (s/=> a))
+                           s/Int)
+         (s/=> s/Int)))
+  (is (not= (@#'s/instantiate (s/all [a] (s/=> a))
+                              s/Bool)
+            (s/=> s/Int)))
+  (is (= (@#'s/instantiate (s/all [a] (s/=> a a))
+                           s/Int)
+         (s/=> s/Int s/Int)))
+  (is (= (@#'s/instantiate (s/all [a b] (s/=> a b a b))
+                           s/Int s/Bool)
+         (s/=> s/Int s/Bool s/Int s/Bool)))
+  (is (= '(=> Int Int)
+         (s/explain (@#'s/instantiate (s/fn-schema poly-identity) s/Int))))
+  (is (thrown-with-msg? Exception #"Wrong number of arguments"
+                        (@#'s/instantiate (s/fn-schema poly-map-nodot) s/Int))))
+
+(deftest inst-most-general-test 
+  (is (= '(=> Any Any)
+         (s/explain (@#'s/inst-most-general (s/fn-schema poly-identity)))))
+  (is (= '(=> Any [Any])
+         (s/explain (@#'s/inst-most-general (s/fn-schema poly-first)))))
+  (is (= '(=> [Any] (=> Any Any) [Any])
+         (s/explain (@#'s/inst-most-general (s/fn-schema poly-map-nodot)))))
+  (is (= '(=> [Any] (=> Any Any & [Any]) [Any] & [[Any]])
+         (s/explain (@#'s/inst-most-general (s/fn-schema poly-map-dot))))))
+
+(deftest poly-defn-semantics-test
+  (poly-semantics-test-suite
+    {:args-shadow-schema-variables args-shadow-schema-variables
+     :poly-identity poly-identity
+     :poly-first poly-first
+     :poly-map-nodot poly-map-nodot
+     :poly-map-dot poly-map-dot
+     :poly-map-dot-arities poly-map-dot-arities}))
+
+(deftest poly-fn-semantics-test
+  (testing "no name"
+    (is (= 1 ((s/fn :all [T] [x :- T] x) 1)))
+    (poly-semantics-test-suite
+      {:args-shadow-schema-variables (s/fn :all [x] :- x [x :- x] x)
+       :poly-identity (s/fn :all [T] :- T [x :- T] (s/validate T x))
+       :poly-first (s/fn :all [T] :- T [xs :- [T]] (first xs))
+       :poly-map-nodot (s/fn :all [X Y] :- [Y] [f :- (s/=> Y X) xs :- [X]] (map f xs))
+       :poly-map-dot (s/fn :all [X Y :.. Z] :- [Z] [f :- (s/=> Z X Y :.. Y) xs :- [X] & yss :- [Y] :.. Y] (apply map f xs yss))
+       :poly-map-dot-arities (s/fn :all [X Y Z S :.. T]
+                               :- [T]
+                               ([f :- (s/=> T X) xs :- [X]] (map f xs))
+                               ([f :- (s/=> T X Y) xs :- [X] ys :- [Y]] (map f xs ys))
+                               ([f :- (s/=> T X Y Z) xs :- [X] ys :- [Y] zs :- [Z]] (map f xs ys zs))
+                               ([f :- (s/=> T X Y Z S :.. S) xs :- [X] ys :- [Y] zs :- [Z] & ss :- [S] :.. S] (apply map f xs ys zs ss)))}))
+  (testing "with name"
+    (poly-semantics-test-suite
+      {:args-shadow-schema-variables (s/fn :all [x] args-shadow-schema-variables :- x [x :- x] x)
+       :poly-identity (s/fn :all [T] poly-identity :- T [x :- T] (s/validate T x))
+       :poly-first (s/fn :all [T] poly-first :- T [xs :- [T]] (first xs))
+       :poly-map-nodot (s/fn :all [X Y] poly-map-nodot :- [Y] [f :- (s/=> Y X) xs :- [X]] (map f xs))
+       :poly-map-dot (s/fn :all [X Y :.. Z] poly-map-dot :- [Z] [f :- (s/=> Z X Y :.. Y) xs :- [X] & yss :- [Y] :.. Y] (apply map f xs yss))
+       :poly-map-dot-arities (s/fn :all [X Y Z S :.. T]
+                               poly-map-dot-arities :- [T]
+                               ([f :- (s/=> T X) xs :- [X]] (map f xs))
+                               ([f :- (s/=> T X Y) xs :- [X] ys :- [Y]] (map f xs ys))
+                               ([f :- (s/=> T X Y Z) xs :- [X] ys :- [Y] zs :- [Z]] (map f xs ys zs))
+                               ([f :- (s/=> T X Y Z S :.. S) xs :- [X] ys :- [Y] zs :- [Z] & ss :- [S] :.. S] (apply map f xs ys zs ss)))})))
+
+(deftest poly-letfn-semantics-test
+  (poly-semantics-test-suite
+    {:args-shadow-schema-variables (s/letfn [(:all [x] args-shadow-schema-variables :- x [x :- x] x)]
+                                     args-shadow-schema-variables)
+     :poly-identity (s/letfn [(:all [T] poly-identity :- T [x :- T] (s/validate T x))]
+                      poly-identity)
+     :poly-first (s/letfn [(:all [T] poly-first :- T [xs :- [T]] (first xs))]
+                   poly-first)
+     :poly-map-nodot (s/letfn [(:all [X Y] poly-map-nodot :- [Y] [f :- (s/=> Y X) xs :- [X]] (map f xs))]
+                       poly-map-nodot)
+     :poly-map-dot (s/letfn [(:all [X Y :.. Z] poly-map-dot :- [Z] [f :- (s/=> Z X Y :.. Y) xs :- [X] & yss :- [Y] :.. Y] (apply map f xs yss))]
+                     poly-map-dot)
+     :poly-map-dot-arities (s/letfn [(:all [X Y Z S :.. T]
+                                       poly-map-dot-arities :- [T]
+                                       ([f :- (s/=> T X) xs :- [X]] (map f xs))
+                                       ([f :- (s/=> T X Y) xs :- [X] ys :- [Y]] (map f xs ys))
+                                       ([f :- (s/=> T X Y Z) xs :- [X] ys :- [Y] zs :- [Z]] (map f xs ys zs))
+                                       ([f :- (s/=> T X Y Z S :.. S) xs :- [X] ys :- [Y] zs :- [Z] & ss :- [S] :.. S] (apply map f xs ys zs ss)))]
+                             poly-map-dot-arities)}))

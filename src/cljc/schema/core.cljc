@@ -75,7 +75,7 @@
    See the docstrings of defrecord, fn, and defn for more details about how
    to use these macros."
   ;; don't exclude def because it's not a var.
-  (:refer-clojure :exclude [Keyword Symbol Inst atom defrecord defn letfn defmethod fn MapEntry ->MapEntry])
+  (:refer-clojure :exclude [Keyword Symbol Inst atom defprotocol defrecord defn letfn defmethod fn MapEntry ->MapEntry])
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
@@ -88,32 +88,18 @@
   #?(:cljs (:require-macros [schema.macros :as macros]
                             schema.core)))
 
-#?(:clj (def ^:no-doc clj-1195-fixed?
-          (do (defprotocol ^:no-doc CLJ1195Check
-                (dummy-method [this]))
-              (try
-                (eval '(extend-protocol CLJ1195Check nil
-                         (dummy-method [_])))
-                true
-                (catch RuntimeException _
-                  false)))))
-
-#?(:clj (when-not clj-1195-fixed?
-         ;; don't exclude fn because of bug in extend-protocol
-         (refer-clojure :exclude '[Keyword Symbol Inst atom defrecord defn letfn defmethod])))
-
 #?(:clj (set! *warn-on-reflection* true))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Schema protocol
 
-(defprotocol Schema
+(clojure.core/defprotocol Schema
   (spec [this]
     "A spec is a record of some type that expresses the structure of this schema
      in a declarative and/or imperative way.  See schema.spec.* for examples.")
   (explain [this]
     "Expand this schema to a human-readable format suitable for pprinting,
-     also expanding class schematas at the leaves.  Example:
+     also expanding class schemas at the leaves.  Example:
 
      user> (s/explain {:a s/Keyword :b [s/Int]} )
      {:a Keyword, :b [Int]}"))
@@ -536,7 +522,7 @@
 
 ;; cond-pre (conditional based on surface type)
 
-(defprotocol HasPrecondition
+(clojure.core/defprotocol HasPrecondition
   (precondition [this]
     "Return a predicate representing the Precondition for this schema:
      the predicate returns true if the precondition is satisfied.
@@ -1066,6 +1052,69 @@
   ([klass schema map-constructor]
      `(record* ~klass ~schema #(~map-constructor (into {} %))))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Polymorphic Schemas
+
+
+(clojure.core/defrecord ^:no-doc AnyDotted [schema])
+
+(declare ^:private inst-most-general)
+
+(macros/defrecord-schema PolySchema [decl parsed-decl schema-form inst->schema]
+  Schema
+  (spec [this] (spec (inst-most-general this)))
+  (explain [this] (list 'all decl schema-form)))
+
+(defn- instantiate
+  "Instantiate a polymorphic schema with schemas."
+  [{:keys [inst->schema parsed-decl] :as for-all-schema} & schemas]
+  {:pre [(instance? PolySchema for-all-schema)]}
+  (macros/assert! (= (count schemas) (count parsed-decl))
+                  "Wrong number of arguments to instantiate schema %s: expected %s, actual %s"
+                  (explain for-all-schema)
+                  (count parsed-decl)
+                  (count schemas))
+  (apply inst->schema schemas))
+
+(defn- most-general-insts [=>-schema]
+  {:pre [(instance? PolySchema =>-schema)]}
+  (mapv (clojure.core/fn [[sym {:keys [kind]}]]
+          (case kind
+            :schema Any
+            :.. (->AnyDotted Any)
+            (throw (ex-info (str "Unknown kind: " kind)
+                            {}))))
+        (:parsed-decl =>-schema)))
+
+(defn- inst-most-general [=>-schema]
+  {:pre [(instance? PolySchema =>-schema)]}
+  (apply instantiate =>-schema (most-general-insts =>-schema)))
+ 
+(clojure.core/defn poly-schema? [v]
+  (instance? PolySchema v))
+
+(defmacro all
+  "Create a polymorphic function schema.
+  
+   Binder declaration is a vector of polymorphic variables and its kinds.
+
+   Schema variables have a 'kind' that classify what it represents.
+   :- assigns a kind to a polymorphic variable. By default, polymorphic variables are kind :schema.
+
+   1. [T :- :schema]   represents a Schema, eg., s/Any, s/Int, (s/=> s/Int s/Bool)
+   2. [T :- :..]       represents a vector of schemas, often to represent heterogenous rest arguments
+                       eg., [s/Int s/Bool]
+
+   [T :..] is sugar for [T :- :..]"
+  [decl schema]
+  {:pre [(vector? decl)]}
+  (let [parsed-decl (macros/parse-poly-binder decl)]
+    `(->PolySchema
+       '~decl
+       '~parsed-decl
+       '~schema
+       (clojure.core/fn ~(mapv first parsed-decl) ~schema))))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Function Schemas
@@ -1114,6 +1163,20 @@
   "Produce a function schema from an output schema and a list of arity input schema specs,
    each of which is a vector of argument schemas, ending with an optional '& more-schema'
    specification where more-schema must be a sequence schema.
+
+   Dotted schemas are allowed as the final arguments, and will be expanded into either fixed
+   or rest arguments upon evaluation.
+
+   For example, if `Y :..` is in scope then (=> Z X [Y] :.. Y) represents the following functions:
+    (=> Z X)
+    (=> Z X [Y0])
+    (=> Z X [Y0] [Y1])
+    (=> Z X [Y0] [Y1] [Y1])
+    ...etc
+
+   Depending on the instantiation of Y, the schema at runtime will be one of the above with
+   concretized Y's or the following schema that encapsulates them all:
+    (=> Z X & [[s/Any]])
 
    Currently function schemas are purely descriptive; there is no validation except for
    functions defined directly by s/fn or s/defn"
@@ -1240,7 +1303,7 @@
    all forms have been executed, resets function validation to its
    previously set value. Not concurrency-safe."
   [& body]
-  `(let [body# (fn [] ~@body)]
+  `(let [body# (clojure.core/fn [] ~@body)]
      (if (fn-validation?)
        (body#)
        (do
@@ -1254,7 +1317,7 @@
    all forms have been executed, resets function validation to its
    previously set value. Not concurrency-safe."
   [& body]
-  `(let [body# (fn [] ~@body)]
+  `(let [body# (clojure.core/fn [] ~@body)]
      (if (fn-validation?)
        (do
          (set-fn-validation! false)
@@ -1282,15 +1345,13 @@
   [f schema]
   (vary-meta f assoc :schema schema))
 
-(clojure.core/defn ^FnSchema fn-schema
+(clojure.core/defn fn-schema
   "Produce the schema for a function defined with s/fn or s/defn."
   [f]
-  (macros/assert! (fn? f) "Non-function %s" (utils/type-of f))
+  ;; protocol methods in bb are multimethods
+  (macros/assert! (or (fn? f) #?@(:bb [(instance? clojure.lang.MultiFn f)])) "Non-function %s" (utils/type-of f))
   (or (utils/class-schema (utils/fn-schema-bearer f))
       (macros/safe-get (meta f) :schema)))
-
-;; work around bug in extend-protocol (refers to bare 'fn, so we can't exclude it).
-#?(:clj (when-not clj-1195-fixed? (ns-unmap *ns* 'fn)))
 
 #?(:clj
 (defmacro fn
@@ -1313,10 +1374,12 @@
              up to 20 arguments, and then via `apply` beyond 20 arguments.
              See `cljs.core/with-meta` and `cljs.core.MetaFn`."
   [& fn-args]
-  (let [fn-args (if (symbol? (first fn-args))
+  (let [[leading-opts fn-args] (macros/extract-leading-fn-kv-pairs fn-args)
+        fn-args (if (symbol? (first fn-args))
                   fn-args
                   (cons (gensym "fn") fn-args))
         [name more-fn-args] (macros/extract-arrow-schematized-element &env fn-args)
+        name (vary-meta name merge leading-opts)
         {:keys [outer-bindings schema-form fn-body]} (macros/process-fn- &env name more-fn-args)]
     `(let [~@outer-bindings
            ;; let bind to work around https://clojure.atlassian.net/browse/CLJS-968
@@ -1350,6 +1413,47 @@
 
    See (doc schema.core) for details of the :- syntax for arguments and return
    schemas.
+
+   You can use :all to make a polymorphic schema by binding polymorphic variables.
+   See `s/all` for more about polymorphic variables.
+ 
+   The polymorphic variables are scoped inside the function body. Note, they will usually be bound
+   to their most general values (eg., s/Any) at runtime. This strategy also informs how
+   `s/with-fn-validation` treats polymorphic variables. However, the values of schema
+   variables should always be treated as opaque.
+
+   In the body of the function, names provided by argument vectors may shadow polymorphic variables.
+
+   (s/defn :all [T]
+    my-identity :- T
+    [x :- T]
+    ;; from here, (destructured) arguments shadow polymorphic variables
+    ...
+    ;; usually equivalent to (s/validate s/Any x)
+    (s/validate T x))
+
+   (s/fn-schema my-identity)
+   ==> (all [T] (=> T T))
+
+
+   Rest parameter schemas may be expanded via dotted variables by placing :.. after
+   the schema following the '&'. The following example demonstrates most usages of
+   dotted variables:
+
+   (s/defn :all [X Y :.. Z]
+     map :- [Z]
+     [f :- (=> Z X Y :.. Y)
+      xs :- [X]
+      & xss :- [Y] :.. Y]
+     (apply map f xs xss))
+
+   The schema for the above function encapsulates the following schemas:
+    (all [X          Z] (=> [Z] (=> Z          X) [X]))
+    (all [X Y0       Z] (=> [Z] (=> Z Y0       X) [X] [Y0]))
+    (all [X Y0 Y1    Z] (=> [Z] (=> Z Y0 Y1    X) [X] [Y0] [Y1]))
+    (all [X Y0 Y1 Y2 Z] (=> [Z] (=> Z Y0 Y1 Y2 X) [X] [Y0] [Y1] [Y0]))
+    ...etc
+
 
    The overhead for checking if run-time validation should be used is very
    small -- about 5% of a very small fn call.  On top of that, actual
@@ -1387,7 +1491,7 @@
         {:keys [outer-bindings schema-form fn-body arglists raw-arglists]} (macros/process-fn- &env name more-defn-args)]
     `(let ~outer-bindings
        (let [ret# (clojure.core/defn ~(with-meta name {})
-                    ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
+                    ~(assoc (apply dissoc standard-meta ::macros/poly-binder (when (macros/primitive-sym? tag) [:tag]))
                        :doc (str
                              (str "Inputs: " (if (= 1 (count raw-arglists))
                                                (first raw-arglists)
@@ -1431,6 +1535,98 @@
                         ~dispatch-val
                         ~methodfn))))))
 
+(defonce
+  ^{:doc
+    "If the s/defprotocol instrumentation strategy is problematic
+    for your platform, set atom to true and instrumentation will not
+    be performed.
+
+    Defaults to false."}
+  ^:dynamic *elide-defprotocol-instrumentation* 
+  (clojure.core/atom false))
+
+(clojure.core/defn instrument-defprotocol?
+  "If true, elide s/defprotocol instrumentation.
+
+  Instrumentation is elided for any of the following cases:
+  *   @*elide-defprotocol-instrumentation* is true during s/defprotocol macroexpansion
+  *   @*elide-defprotocol-instrumentation* is true during s/defprotocol evaluation"
+  []
+  (not @*elide-defprotocol-instrumentation*))
+
+#?(:clj
+(defmacro defprotocol
+  "Like clojure.core/defprotocol, except schema-style typehints can be provided for
+  the argument symbols and after method names (for output schemas).
+
+  ^:always-validate and ^:never-validate metadata can be specified for all
+  methods on the protocol name. If specified on the method name, ignores
+  the protocol name metatdata and uses the method name metadata.
+
+  Examples:
+
+    (s/defprotocol MyProtocol
+      \"Docstring\"
+      :extend-via-metadata true
+      (^:always-validate method1 :- s/Int
+        [this a :- s/Bool]
+        [this a :- s/Any, b :- s/Str]
+        \"Method doc2\")
+      (^:never-validate method2 :- s/Int
+        [this]
+        \"Method doc2\"))
+  
+  Gotchas and limitations:
+  - Implementation details are used to instrument protocol methods for schema
+    checking. This is tested against a variety of platforms and versions,
+    however if this is problematic for your environment, use
+    *elide-defprotocol-instrumentation* to disable such instrumentation
+    (either at compile-time or runtime depending on your needs).
+    In ClojureScript, method var metadata will be overwritten unless disabled
+    at compile-time. 
+  - :schema metadata on protocol method vars is only supported in Clojure.
+  - Clojure will never inline protocol methods, as :inline metadata is added to protocol
+    methods designed to defeat potential short-circuiting of schema checks. This also means
+    compile-time errors for arity errors are suppressed (eg., `No single method` errors).
+  - Methods cannot be instrumented in babashka due to technical limitations."
+  [& name+opts+sigs]
+  (let [{:keys [pname doc opts parsed-sigs]} (macros/process-defprotocol &env name+opts+sigs)
+        sigs (map :sig parsed-sigs)
+        defprotocol-form `(clojure.core/defprotocol
+                            ~pname
+                            ~@(when doc [doc])
+                            ~@opts
+                            ~@sigs)
+        instrument? (instrument-defprotocol?)]
+    `(do ~defprotocol-form
+         ;; put everything that relies on protocol implementation details here so the user can
+         ;; turn it off for whatever reason.
+         ~@(when instrument?
+             ;; in bb, protocol methods are multimethods. there's no way to be notified when
+             ;; a multimethod is extended so we're stuck.
+             #?(:bb nil
+                :default (map (fn [{:keys [method-name instrument-method]}]
+                                `(when (instrument-defprotocol?)
+                                   ~instrument-method))
+                              parsed-sigs)))
+         ;; we always want s/fn-schema to work on protocol methods and have :schema
+         ;; metadata on the var in Clojure.
+         ~@(map (fn [{:keys [method-name schema-form]}]
+                  `(let [fn-schema# ~schema-form]
+                     ;; utils/declare-class-schema! works for subtly different reasons for each platform:
+                     ;; :clj -- while CLJ-1796 means a method will change its identity after -reset-methods,
+                     ;;         it does not change its class, as the same method builder is used each time.
+                     ;;         fn-schema-bearer uses the class in :clj, so we're ok.
+                     ;; :cljs -- method identity never changes, and fn-schema-bearer uses function identity in :cljs.
+                     ;; :bb -- methods are multimethods which have defonce semantics are always class MultiFn. Object identity is used.
+                     (utils/declare-class-schema! (macros/if-bb ~method-name (utils/fn-schema-bearer ~method-name)) fn-schema#)
+                     ;; also add :schema metadata like s/defn
+                     (macros/if-cljs
+                       nil
+                       (alter-meta! (var ~method-name) assoc :schema fn-schema#))))
+                parsed-sigs)
+         ~pname))))
+
 #?(:clj
 (defmacro letfn
   "s/letfn : s/fn :: clojure.core/letfn : clojure.core/fn
@@ -1442,8 +1638,10 @@
   (let [{:keys [outer-bindings
                 fnspecs
                 inner-bindings]}
-        (reduce (fn [acc fnspec]
-                  (let [[name more-fn-args] (macros/extract-arrow-schematized-element &env fnspec)
+        (reduce (clojure.core/fn [acc fnspec]
+                  (let [[leading-opts fnspec] (macros/extract-leading-fn-kv-pairs fnspec)
+                        [name more-fn-args] (macros/extract-arrow-schematized-element &env fnspec)
+                        name (vary-meta name merge leading-opts)
                         {:keys [outer-bindings schema-form fn-body]} (macros/process-fn- &env name more-fn-args)]
                     (-> acc
                         (update :outer-bindings into outer-bindings)
