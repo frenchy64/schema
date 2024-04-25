@@ -181,3 +181,8 @@
   #?(:bb (atom false)
      :clj (java.util.concurrent.atomic.AtomicReference. false)
      :cljs (atom false)))
+
+(defprotocol HasTypeHint
+  (type-hint [this opts]
+             "Return a Class, symbol, or string to use as a type hint for this schema.
+             nil if none."))

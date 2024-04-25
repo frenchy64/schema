@@ -116,17 +116,8 @@
   type hints when possible.
 
   A valid tag is a primitive, Class, or Var containing a Class."
-  [env tag]
-  (when (symbol? tag)
-    (let [resolved (delay (resolve env tag))]
-      (cond
-        (or (primitive-sym? tag) (class? @resolved))
-        tag
-
-        (var? @resolved)
-        (let [v (var-get @resolved)]
-          (when (class? v)
-            (symbol (.getName ^Class v))))))))
+  [_env tag]
+  (utils/type-hint tag nil))
 
 (defn normalized-metadata
   "Take an object with optional metadata, which may include a :tag,

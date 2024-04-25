@@ -122,10 +122,11 @@
 (clojure.core/defn checker
   "Compile an efficient checker for schema, which returns nil for valid values and
    error descriptions otherwise."
-  [schema]
-  (comp utils/error-val
-        (spec/run-checker
-         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)))
+  ([schema] (checker schema nil))
+  ([schema opts]
+   (comp utils/error-val
+         (spec/run-checker
+           (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -190,47 +191,21 @@
                   (symbol (.getName ^Class this)))
          :cljs this))))
 
-(extend-protocol Schema
-  #?(:clj Class
-     :cljs function)
-  (spec [this] (-class-spec this))
-  (explain [this] (-class-explain this))
-  #?@(:bb [sci.lang.Type
-           (spec [this] (-class-spec this))
-           (explain [this] (-class-explain this))]))
+(let [#?@(:clj (clj-perf-warn? (not= "true" (System/getProperty "schema.core.no-class-perf-warn="))))]
+  (extend-protocol Schema
+    #?(:clj Class
+        :cljs function)
+    (spec [this]
+      #?(:clj (when clj-perf-warn?
+                (println (str "WARNING: suboptimal Class schema for "
+                              (.getName this) ", should declare and use class via defschema. "
+                              "Suppress this warning via -Dschema.core.no-class-perf-warn=true"))))
+      (-class-spec this))
+    (explain [this] (-class-explain this))
+    #?@(:bb [sci.lang.Type
+             (spec [this] (-class-spec this))
+             (explain [this] (-class-explain this))])))
 
-
-;; On the JVM, the primitive coercion functions (double, long, etc)
-;; alias to the corresponding boxed number classes
-
-#?(:clj
-(do
-  (defmacro extend-primitive [cast-sym class-sym]
-    (let [qualified-cast-sym `(class @(resolve '~cast-sym))]
-      `(extend-protocol Schema
-         ~qualified-cast-sym
-         (spec [this#]
-           (variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}]))
-         (explain [this#]
-           '~cast-sym))))
-
-  (extend-primitive double Double)
-  (extend-primitive float Float)
-  (extend-primitive long Long)
-  (extend-primitive int Integer)
-  (extend-primitive short Short)
-  (extend-primitive char Character)
-  (extend-primitive byte Byte)
-  (extend-primitive boolean Boolean)
-
-  (extend-primitive doubles (Class/forName "[D"))
-  (extend-primitive floats (Class/forName "[F"))
-  (extend-primitive longs (Class/forName "[J"))
-  (extend-primitive ints (Class/forName "[I"))
-  (extend-primitive shorts (Class/forName "[S"))
-  (extend-primitive chars (Class/forName "[C"))
-  (extend-primitive bytes (Class/forName "[B"))
-  (extend-primitive booleans (Class/forName "[Z"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Cross-platform Schema leaves
@@ -297,24 +272,95 @@
 
 ;;; pred (matches all values for which p? returns truthy)
 
+(extend-protocol utils/HasTypeHint
+  #?@(:clj
+       (Class
+        (type-hint [v _opts] (symbol (.getName v)))
+
+        clojure.lang.Symbol
+        (type-hint [tag _opts] (if (macros/primitive-sym? tag)
+                                 tag
+                                 (let [c (resolve tag)]
+                                   (when (class? c)
+                                     (symbol (.getName ^Class c))))))
+
+        clojure.lang.Var
+        (type-hint [v _opts] @v)))
+
+  nil
+  (type-hint [v _opts] nil)
+
+  #?(:clj Object :cljs default)
+  (type-hint [v _opts] nil))
+
+(declare Int Keyword Symbol Str)
+
 (macros/defrecord-schema Predicate [p? pred-name]
   Schema
   (spec [this] (leaf/leaf-spec (spec/precondition this p? #(list pred-name %))))
   (explain [this]
-    (cond (= p? integer?) 'Int
-          (= p? keyword?) 'Keyword
-          (= p? symbol?) 'Symbol
-          (= p? string?) 'Str
-          :else (list 'pred pred-name))))
+    (or (schema-name this)
+        (cond (= p? integer?) 'Int
+              (= p? keyword?) 'Keyword
+              (= p? symbol?) 'Symbol
+              (= p? string?) 'Str
+              :else (list 'pred pred-name))))
+  utils/HasTypeHint
+  (type-hint [this _] (:hint (meta this))))
 
 (clojure.core/defn pred
   "A value for which p? returns true (and does not throw).
    Optional pred-name can be passed for nicer validation errors."
   ([p?] (pred p? (symbol (utils/fn-name p?))))
-  ([p? pred-name]
+  ([p? pred-name] (pred p? pred-name nil))
+  ([p? pred-name hint]
      (when-not (ifn? p?)
        (macros/error! (utils/format* "Not a function: %s" p?)))
-     (Predicate. p? pred-name)))
+     (with-meta (Predicate. p? pred-name) {:hint hint})))
+
+
+;; On the JVM, the primitive coercion functions (double, long, etc)
+;; alias to the corresponding boxed number classes
+
+#?(:clj
+(do
+  (defmacro extend-primitive
+    [cast-sym class-sym]
+    (let [qualified-cast-sym `(class @(resolve '~cast-sym))
+          cls-qsym (when (symbol? class-sym)
+                     (let [^Class cls (resolve class-sym)]
+                       (when (class? cls)
+                         (symbol (.getName cls)))))]
+      `(extend-protocol Schema
+         ~qualified-cast-sym
+         (spec [_#]
+           ~(if cls-qsym
+              `(spec (spec/precondition #(instance? ~cls-qsym %) '~cast-sym '~cast-sym))
+              ;; mostly for array classes.
+              ;; TBD: Clojure might have better support for array classes in the future,
+              ;; not seeing any work on faster instance? checks though (not sure if that's possible).
+              ;; https://clojure.atlassian.net/browse/CLJ-2807
+              `(variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}])))
+         (explain [this#]
+           '~cast-sym))))
+
+  (extend-primitive double Double)
+  (extend-primitive float Float)
+  (extend-primitive long Long)
+  (extend-primitive int Integer)
+  (extend-primitive short Short)
+  (extend-primitive char Character)
+  (extend-primitive byte Byte)
+  (extend-primitive boolean Boolean)
+
+  (extend-primitive doubles (Class/forName "[D"))
+  (extend-primitive floats (Class/forName "[F"))
+  (extend-primitive longs (Class/forName "[J"))
+  (extend-primitive ints (Class/forName "[I"))
+  (extend-primitive shorts (Class/forName "[S"))
+  (extend-primitive chars (Class/forName "[C"))
+  (extend-primitive bytes (Class/forName "[B"))
+  (extend-primitive booleans (Class/forName "[Z"))))
 
 
 ;;; protocol (which value must `satisfies?`)
@@ -370,32 +416,56 @@
 (def Str
   "Satisfied only by String.
    Is (pred string?) and not js/String in cljs because of keywords."
-  #?(:clj java.lang.String :cljs (pred string? 'string?)))
+  (vary-meta (pred string? 'string? #?(:clj java.lang.String))
+             assoc :name 'Str))
 
 (def Bool
   "Boolean true or false"
-  #?(:clj java.lang.Boolean :cljs js/Boolean))
+  (vary-meta
+    (pred #?(:clj #(instance? java.lang.Boolean %)
+             :cljs boolean?)
+          'boolean?
+          #?(:clj java.lang.Boolean
+             ;; maybe
+             :cljs nil #_'boolean))
+    assoc :name 'Bool))
 
 (def Num
   "Any number"
-  #?(:clj java.lang.Number :cljs js/Number))
+  (vary-meta
+    (pred number? 'number?
+          #?(:clj java.lang.Number))
+    assoc :name 'Num))
 
 (def Int
   "Any integral number"
-  (pred integer? 'integer?))
+  (vary-meta
+    (pred integer? 'integer?)
+    assoc :name 'Int))
 
 (def Keyword
   "A keyword"
-  (pred keyword? 'keyword?))
+  (vary-meta
+    (pred keyword? 'Keyword
+          #(:clj clojure.lang.Keyword))
+    assoc :name 'Keyword))
 
 (def Symbol
   "A symbol"
-  (pred symbol? 'symbol?))
+  (vary-meta
+    (pred symbol? 'Symbol
+          #(:clj clojure.lang.Symbol))
+    assoc :name 'Symbol))
 
 (def Regex
   "A regular expression"
-  #?(:clj java.util.regex.Pattern
-     :cljs (reify Schema ;; Closure doesn't like if you just def as js/RegExp
+  #?(:clj (vary-meta
+            (pred #(instance? java.util.regex.Pattern)
+                  'Regex
+                  java.util.regex.Pattern)
+            assoc :name 'Regex)
+     :cljs ^{:name 'Regex}
+           (reify Schema ;; Closure doesn't like if you just def as js/RegExp
              (spec [this]
                (leaf/leaf-spec
                  (spec/precondition this #(instance? js/RegExp %) #(list 'instance? 'js/RegExp %))))
@@ -403,12 +473,21 @@
 
 (def Inst
   "The local representation of #inst ..."
-  #?(:clj java.util.Date :cljs js/Date))
+  #?(:clj (vary-meta
+            (pred #(instance? java.util.Date %)
+                  'Inst
+                  java.util.Date)
+            assoc :name 'Inst)
+     :cljs js/Date))
 
 (def Uuid
   "The local representation of #uuid ..."
-  #?(:clj java.util.UUID :cljs cljs.core/UUID))
-
+  #?(:clj (vary-meta
+            (pred #(instance? java.util.UUID %)
+                  'java.util.UUID
+                  java.util.UUID)
+            assoc :name 'Uuid)
+     :cljs cljs.core/UUID))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -423,7 +502,12 @@
      spec/+no-precondition+
      [{:guard nil? :schema (eq nil)}
       {:schema schema}]))
-  (explain [this] (list 'maybe (explain schema))))
+  (explain [this] (list 'maybe (explain schema)))
+
+  ;; (fn [a :- (Maybe Number)]) => (fn [^Number a])
+  #?@(:clj
+       (utils/HasTypeHint
+         (type-hint [_ opts] (utils/type-hint schema opts)))))
 
 (clojure.core/defn maybe
   "A value that must either be nil or satisfy schema"
@@ -1004,13 +1088,14 @@
 
 ;; A Record schema describes a value that must have the correct type, and its body must
 ;; also satisfy a map schema.  An optional :extra-validator-fn can also be attached to do
-;; additional validation.
+;; additional validation. :pred metadata can be used to override the default inefficient
+;; instance-of call.
 
 (macros/defrecord-schema Record [klass schema]
   Schema
   (spec [this]
     (collection/collection-spec
-     (let [p (spec/precondition this #(instance? klass %) #(list 'instance? klass %))]
+     (let [p (spec/precondition this (or (:pred (meta this)) #(instance? klass %)) #(list 'instance? klass %))]
        (if-let [evf (:extra-validator-fn this)]
          (some-fn p (spec/precondition this evf #(list 'passes-extra-validation? %)))
          p))
@@ -1024,10 +1109,13 @@
                      :cljs (symbol (pr-str klass)))
           (explain schema))))
 
-(clojure.core/defn record* [klass schema map-constructor]
-  #?(:clj (macros/assert! (or (class? klass) #?(:bb (instance? sci.lang.Type klass))) "Expected record class, got %s" (utils/type-of klass)))
-  (macros/assert! (map? schema) "Expected map, got %s" (utils/type-of schema))
-  (with-meta (Record. klass schema) {:konstructor map-constructor}))
+(clojure.core/defn record*
+  ([klass schema map-constructor] (record* klass schema map-constructor nil))
+  ([klass schema map-constructor pred]
+   #?(:clj (macros/assert! (or (class? klass) #?(:bb (instance? sci.lang.Type klass))) "Expected record class, got %s" (utils/type-of klass)))
+   (macros/assert! (map? schema) "Expected map, got %s" (utils/type-of schema))
+   (with-meta (Record. klass schema) {:konstructor map-constructor
+                                      :pred pred})))
 
 #?(:clj
 (defmacro record
@@ -1037,7 +1125,12 @@
    not pass one, an attempt is made to find the corresponding function
    (but this may fail in exotic circumstances)."
   ([klass schema]
-   (let [map-ctor-var (let [bits (str/split (name klass) #"/")]
+   (let [^Class resolved (when-not (macros/cljs-env? &env)
+                           (when (symbol? klass)
+                             (let [c (resolve &env klass)]
+                               (when (class? c)
+                                 c))))
+         map-ctor-var (let [bits (str/split (name klass) #"/")]
                         (symbol (str/join "/" (concat (butlast bits) [(str "map->" (last bits))]))))
          map-ctor-mth (symbol (str (name klass) "/create"))]
      `(record ~klass ~schema
@@ -1045,9 +1138,13 @@
                 ~map-ctor-var
                 (macros/if-bb
                   ~map-ctor-var
-                  #(~map-ctor-mth %))))))
+                  #(~map-ctor-mth %)))
+              ~(when-let [cls-qsym (-> resolved .getName symbol)]
+                 `#(instance? ~cls-qsym %)))))
   ([klass schema map-constructor]
-     `(record* ~klass ~schema #(~map-constructor (into {} %))))))
+     `(record* ~klass ~schema #(~map-constructor (into {} %))))
+  ([klass schema map-constructor pred]
+     `(record* ~klass ~schema #(~map-constructor (into {} %)) ~pred))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1112,7 +1209,7 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Helpers for defining schemas (used in in-progress work, explanation coming soon)
+;;; Helpers for defining schemas
 
 (clojure.core/defn schema-with-name
   "Records name in schema's metadata."
@@ -1135,14 +1232,25 @@
 #?(:clj
 (defmacro defschema
   "Convenience macro to make it clear to reader that body is meant to be used as a schema.
-   The name of the schema is recorded in the metadata."
+   The name of the schema is recorded in the metadata.
+
+   If form names a top-level-resolvable class, will be converted to a schema
+   with an efficient instance? check and metadata support."
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
      `(def ~name ~docstring
-        (vary-meta
-         (schema-with-name ~form '~name)
-         assoc :ns '~(ns-name *ns*))))))
+        (let [schema# ~(if-some [^Class cls (when-not (macros/cljs-env? &env)
+                                              (when (symbol? form)
+                                                (let [c (resolve &env form)]
+                                                  (when (class? c)
+                                                    c))))]
+                         (let [tag (symbol (.getName cls))]
+                           `(pred #(instance? ~cls) '~name '~tag))
+                         form)]
+          (vary-meta
+            (schema-with-name schema# '~name)
+            assoc :ns '~(ns-name *ns*)))))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
