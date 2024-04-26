@@ -1152,10 +1152,23 @@
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
+   (let [register-class-preds (fn register-class-preds [form]
+                                (cond
+                                  (symbol? form)
+                                  (let [c (resolve &env form)]
+                                    (if (class? c)
+                                      `(doto ~c
+                                         (utils/register-class-pred! #(instance? ~c %)))
+                                      c))
+                                  (vector? form) (mapv register-class-preds form)
+                                  (map? form) (reduce-kv (fn [m k v]
+                                                           (assoc m (register-class-preds k) (register-class-preds v)))
+                                                         {} form)
+                                  :else form))]
      `(def ~name ~docstring
         (vary-meta
-         (schema-with-name ~form '~name)
-         assoc :ns '~(ns-name *ns*))))))
+          (schema-with-name ~form '~name)
+          assoc :ns '~(ns-name *ns*)))))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

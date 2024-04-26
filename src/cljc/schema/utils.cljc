@@ -175,7 +175,8 @@
 #?(:clj
    (let [class->pred (java.util.WeakHashMap.)]
      (defn register-class-pred! [cls pred]
-       (.put class->pred cls pred)
+       (when (class? cls)
+         (.put class->pred cls pred))
        pred)
      (defn get-class-pred [cls]
        (.get class->pred cls))))

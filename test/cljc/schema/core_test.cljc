@@ -762,8 +762,6 @@
   PProtocol
   (do-something [this] 4))
 
-(s/defschema Bar4Record Bar4)
-
 (deftest defrecord-schema-test
   (is (= (utils/class-schema Bar)
          (s/record Bar {:foo s/Int
@@ -786,9 +784,9 @@
   (invalid! Bar3 (assoc (Bar3. 1 "test") :foo :bar))
   (is (= 3 (do-something (Bar3. 1 "test"))))
 
-  (valid! Bar4Record (Bar4. [1] {"test" "test"}))
-  (valid! Bar4Record (Bar4. [1] nil))
-  (invalid! Bar4Record (Bar4. ["a"] {"test" "test"}))
+  (valid! Bar4 (Bar4. [1] {"test" "test"}))
+  (valid! Bar4 (Bar4. [1] nil))
+  (invalid! Bar4 (Bar4. ["a"] {"test" "test"}))
   (is (= 4 (do-something (Bar4. 1 "test")))))
 
 (s/defrecord BarNewStyle
