@@ -169,6 +169,16 @@
   (defn class-schema [klass]
     (gobject/get klass "schema$utils$schema"))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for fast class predicates
+
+#?(:clj
+   (let [class->pred (java.util.WeakHashMap.)]
+     (defn register-class-pred! [cls pred]
+       (.put class->pred cls pred)
+       pred)
+     (defn get-class-pred [cls]
+       (.get class->pred cls))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Utilities for fast-as-possible reference to use to turn fn schema validation on/off
