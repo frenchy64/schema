@@ -600,9 +600,7 @@
 
 (defn register-class-preds
   "Collect the likely Class's referred to by this form and return forms to
-  register their fast predicates. If not a top-level form, returns nothing.
-  
-  Assumes that all previously registered preds were done at runtime."
+  register their fast predicates. If not a top-level form, returns nothing."
   [&env form]
   (when-not (or (cljs-env? &env) bb?)
     (let [candidates (atom [])
@@ -612,7 +610,8 @@
                                      ;; (def a Class) is a common idiom because (defschema a Class) doesn't work
                                      c (cond-> c (var? c) deref)]
                                  (when (and (class? c)
-                                            (not (utils/get-class-pred c)))
+                                            (or *compile-files*
+                                                (not (utils/get-class-pred c))))
                                    (swap! candidates conj c))))
                              form)
                            form)]

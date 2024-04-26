@@ -1313,12 +1313,15 @@
                   (cons (gensym "fn") fn-args))
         [name more-fn-args] (macros/extract-arrow-schematized-element &env fn-args)
         {:keys [outer-bindings schema-form fn-body]} (macros/process-fn- &env name more-fn-args)]
-    `(let [~@outer-bindings
-           ;; let bind to work around https://clojure.atlassian.net/browse/CLJS-968
-           f# ~(vary-meta `(clojure.core/fn ~name ~@fn-body)
-                          #(assoc (merge (meta &form) %)
-                                  :schema schema-form))]
-       f#))))
+    `(do ~@(when-not (and (not (macros/cljs-env? &env)) macros/bb?)
+             (when (empty? &env) ;; likely a top-level form
+               (macros/register-class-preds &env schema-form)))
+         (let [~@outer-bindings
+               ;; let bind to work around https://clojure.atlassian.net/browse/CLJS-968
+               f# ~(vary-meta `(clojure.core/fn ~name ~@fn-body)
+                              #(assoc (merge (meta &form) %)
+                                      :schema schema-form))]
+           f#)))))
 
 #?(:clj
 (defmacro defn
@@ -1422,11 +1425,10 @@
          ~methodfn)
        ~#?(:bb `(let [methodfn# ~methodfn]
                   (clojure.core/defmethod ~multifn ~dispatch-val [& args#] (apply methodfn# args#)))
-           :default `(do ~@(macros/register-class-preds &env )
-                         (. ~(with-meta multifn {:tag 'clojure.lang.MultiFn})
-                            addMethod
-                            ~dispatch-val
-                            ~methodfn)))))))
+           :default `(. ~(with-meta multifn {:tag 'clojure.lang.MultiFn})
+                        addMethod
+                        ~dispatch-val
+                        ~methodfn))))))
 
 (defonce
   ^{:doc
