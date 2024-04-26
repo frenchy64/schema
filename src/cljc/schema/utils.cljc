@@ -174,7 +174,12 @@
 
 #?(:clj
    (let [class->pred (java.util.WeakHashMap.)]
-     (defn register-class-pred! [cls pred]
+     (defn register-class-pred!
+       "Only register a pred at runtime, not during macroexpansion.
+       This is so we can reduce generated code by checking if we've
+       already registered the predicate in a way that's already compatible
+       with AOT-compilation."
+       [cls pred]
        (when (class? cls)
          (.put class->pred cls pred))
        pred)
