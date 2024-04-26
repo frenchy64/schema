@@ -84,7 +84,8 @@
    [schema.spec.core :as spec :include-macros true]
    [schema.spec.leaf :as leaf]
    [schema.spec.variant :as variant]
-   [schema.spec.collection :as collection])
+   [schema.spec.collection :as collection]
+   [clojure.core :as cc])
   #?(:cljs (:require-macros [schema.macros :as macros]
                             schema.core)))
 
@@ -134,7 +135,7 @@
       #(if (try (pred %) (catch Throwable _))
          nil
          (explainer %))
-      (do (assert nil schema) explainer))))
+      (do (prn "NONE" schema) #_(assert nil schema) explainer))))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -814,18 +815,39 @@
 (macros/defrecord-schema MapEntry [key-schema val-schema]
   Schema
   (spec [this]
-    (collection/collection-spec
-     spec/+no-precondition+
-     map-entry-ctor
-     [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
-      (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
-     (clojure.core/fn [[k] [xk xv] _]
-       (if-let [k-err (utils/error-val xk)]
-         [k-err 'invalid-key]
-         [k (utils/error-val xv)]))))
+    (let [konstructor map-entry-ctor
+          elements [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
+                    (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
+          on-error (clojure.core/fn [[k] [xk xv] _]
+                     (if-let [k-err (utils/error-val xk)]
+                       [k-err 'invalid-key]
+                       [k (utils/error-val xv)]))]
+      (reify
+        spec/CoreSpec
+        (subschemas [_] [key-schema val-schema])
+        (checker [_ {:keys [return-walked?] :as params}]
+          (let [kchecker (spec/checker key-schema params)
+                vchecker (spec/checker val-schema params)
+                pre-fail (if return-walked? identity #(list 'not (list 'map-entry? %)))
+                ctor (if return-walked? map-entry-ctor (cc/fn [_ _] nil))]
+            (cc/fn [x]
+              (if-not (map-entry? x)
+                (pre-fail x)
+                (let [kerr (kchecker (key x))
+                      verr (vchecker (val x))]
+                  (when (or kerr verr)
+                    (ctor kerr verr)))))))
+        spec/PredSpec
+        (pred [_ params]
+          (let [kp (pred key-schema params)
+                kv (pred val-schema params)]
+            (cc/fn [e]
+              (and (map-entry? e)
+                   (kp (key e))
+                   (kv (val e)))))))))
   (explain [this]
     (list
-     'map-entry
+     'map-entry?
      (explain key-schema)
      (explain val-schema))))
 

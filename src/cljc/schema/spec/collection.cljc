@@ -68,6 +68,7 @@
         (mapcat subschemas (next elt)))))
 
 (defrecord CollectionSpec [pre konstructor elements on-error]
+  
   spec/CoreSpec
   (subschemas [this] (mapcat subschemas elements))
   (checker [this params]
@@ -80,19 +81,7 @@
                   res #?(:clj res :cljs @res)]
               (if (or (seq remaining) (has-error? res))
                 (utils/error (on-error x res remaining))
-                (konstructor res)))))))
-  spec/PredSpec
-  (pred [this params]
-    (if-some [base-pred (-> this meta :base-pred)]
-      (let [t (sequence-transformer elements params (fn [_ x] x))]
-        (fn [x]
-          (and (base-pred x)
-               (let [res #?(:clj (java.util.ArrayList.) :cljs (atom []))
-                     remaining (t res x)
-                     res #?(:clj res :cljs @res)]
-                 (and (empty? remaining)
-                      (not (has-error? res)))))))
-      (println "WARNING: No fast pred for CollectionSpec"))))
+                (konstructor res))))))))
 
 (defn collection-spec
   "A collection represents a collection of elements, each of which is itself
