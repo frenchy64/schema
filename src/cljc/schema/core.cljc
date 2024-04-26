@@ -1152,7 +1152,8 @@
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
-   `(do ~@(when-not (macros/cljs-env? &env)
+   `(do ~@(when-not (or (macros/cljs-env? &env)
+                        macros/bb?)
             (macros/register-class-preds &env form))
         (def ~name ~docstring
           (vary-meta
