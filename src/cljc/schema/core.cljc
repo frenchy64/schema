@@ -372,15 +372,21 @@
 (def Str
   "Satisfied only by String.
    Is (pred string?) and not js/String in cljs because of keywords."
-  #?(:clj java.lang.String :cljs (pred string? 'string?)))
+  #?(:clj (doto java.lang.String
+            (utils/register-class-pred! string?))
+     :cljs (pred string? 'string?)))
 
 (def Bool
   "Boolean true or false"
-  #?(:clj java.lang.Boolean :cljs js/Boolean))
+  #?(:clj (doto java.lang.Boolean
+            (utils/register-class-pred! #(instance? Boolean %)))
+     :cljs js/Boolean))
 
 (def Num
   "Any number"
-  #?(:clj java.lang.Number :cljs js/Number))
+  #?(:clj (doto java.lang.Number
+            (utils/register-class-pred! number?))
+     :cljs js/Number))
 
 (def Int
   "Any integral number"
@@ -396,7 +402,8 @@
 
 (def Regex
   "A regular expression"
-  #?(:clj java.util.regex.Pattern
+  #?(:clj (doto java.util.regex.Pattern
+            (utils/register-class-pred! #(instance? java.util.regex.Pattern %)))
      :cljs (reify Schema ;; Closure doesn't like if you just def as js/RegExp
              (spec [this]
                (leaf/leaf-spec
@@ -405,11 +412,15 @@
 
 (def Inst
   "The local representation of #inst ..."
-  #?(:clj java.util.Date :cljs js/Date))
+  #?(:clj (doto java.util.Date
+            (utils/register-class-pred! #(instance? java.util.Date %)))
+     :cljs js/Date))
 
 (def Uuid
   "The local representation of #uuid ..."
-  #?(:clj java.util.UUID :cljs cljs.core/UUID))
+  #?(:clj (doto java.util.UUID
+            (utils/register-class-pred! #(instance? java.util.UUID %)))
+     :cljs cljs.core/UUID))
 
 
 
