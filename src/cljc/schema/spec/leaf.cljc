@@ -19,6 +19,9 @@
 (defn leaf-spec
   "A leaf spec represents an atomic datum that is checked completely
    with a single precondition, and is otherwise a black box to Schema."
-  [pre ;- spec/Precondition
-   ]
-  (->LeafSpec pre))
+  ([pre ;- spec/Precondition
+    ]
+   (->LeafSpec pre))
+  ([pre ;- spec/Precondition
+    pred]
+   (assoc (->LeafSpec pre) :pred pred)))

@@ -119,21 +119,22 @@
               (prefer-method m schema.core.Schema java.util.Map)
               (prefer-method m schema.core.Schema clojure.lang.IPersistentMap))))
 
+(clojure.core/defn- predicate [schema]
+  (spec/run-pred (clojure.core/fn [s params] (spec/pred (spec s) params))
+                 schema))
+
 (clojure.core/defn checker
   "Compile an efficient checker for schema, which returns nil for valid values and
    error descriptions otherwise."
   [schema]
-  (let [pred (spec/run-pred (clojure.core/fn [s params] (spec/pred (spec s) params))
-                            schema)
-        explainer (comp utils/error-val
+  (let [explainer (comp utils/error-val
                         (spec/run-checker
                           (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))]
-    (prn "pred" pred)
-    (if-not pred
-      explainer
-      #(if (pred %)
+    (if-some [pred (predicate schema)]
+      #(if (try (pred %) (catch Throwable _))
          nil
-         (explainer %)))))
+         (explainer %))
+      (do (assert nil schema) explainer))))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -273,7 +274,9 @@
 
 (macros/defrecord-schema EqSchema [v]
   Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this #(= v %) #(list '= v %))))
+  (spec [this] (let [pred #(= v %)]
+                 (leaf/leaf-spec (spec/precondition this pred #(list '= v %))
+                                 pred)))
   (explain [this] (list 'eq v)))
 
 (clojure.core/defn eq
@@ -305,7 +308,9 @@
 
 (macros/defrecord-schema EnumSchema [vs]
   Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this #(contains? vs %) #(list vs %))))
+  (spec [this] (let [pred #(contains? vs %)]
+                 (leaf/leaf-spec (spec/precondition this pred #(list vs %))
+                                 pred)))
   (explain [this] (cons 'enum vs)))
 
 (clojure.core/defn enum
@@ -485,7 +490,7 @@
     (variant/variant-spec
      spec/+no-precondition+
      (for [s schemas]
-       {:guard (complement (checker s)) ;; since the guard determines which option we check against
+       {:guard (predicate s) ;; since the guard determines which option we check against
         :schema s})
      #(list 'some-matching-either-clause? %)))
   (explain [this] (cons 'either (map explain schemas))))
@@ -565,13 +570,14 @@
 
   schema.spec.variant.VariantSpec
   (precondition [^schema.spec.variant.VariantSpec this]
-    (every-pred
-     (complement (.-pre this))
-     (apply some-fn
-            (for [{:keys [guard schema]} (.-options this)]
-              (if guard
-                (every-pred guard (precondition (spec schema)))
-                (precondition (spec schema)))))))
+    (let [pred (predicate this)]
+      (every-pred
+        (complement (.-pre this))
+        (apply some-fn
+               (for [{:keys [guard schema]} (.-options this)]
+                 (if guard
+                   (every-pred guard (precondition (spec schema)))
+                   (precondition (spec schema))))))))
 
   schema.spec.collection.CollectionSpec
   (precondition [this]
