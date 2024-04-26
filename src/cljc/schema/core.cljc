@@ -1152,9 +1152,7 @@
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
-   `(do ~@(when-not (or (macros/cljs-env? &env)
-                        macros/bb?)
-            (macros/register-class-preds &env form))
+   `(do ~@(macros/register-class-preds &env form)
         (def ~name ~docstring
           (vary-meta
             (schema-with-name ~form '~name)
@@ -1382,22 +1380,23 @@
   (let [[name & more-defn-args] (macros/normalized-defn-args &env defn-args)
         {:keys [doc tag] :as standard-meta} (meta name)
         {:keys [outer-bindings schema-form fn-body arglists raw-arglists]} (macros/process-fn- &env name more-defn-args)]
-    `(let ~outer-bindings
-       (let [ret# (clojure.core/defn ~(with-meta name {})
-                    ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
-                       :doc (str
-                             (str "Inputs: " (if (= 1 (count raw-arglists))
-                                               (first raw-arglists)
-                                               (apply list raw-arglists)))
-                             (when-let [ret (when (= (second defn-args) :-) (nth defn-args 2))]
-                               (str "\n  Returns: " ret))
-                             (when doc (str  "\n\n  " doc)))
-                       :raw-arglists (list 'quote raw-arglists)
-                       :arglists (list 'quote arglists)
-                       :schema schema-form)
-                    ~@fn-body)]
-         (utils/declare-class-schema! (utils/fn-schema-bearer ~name) ~schema-form)
-         ret#)))))
+    `(do ~@(macros/register-class-preds &env schema-form)
+         (let ~outer-bindings
+           (let [ret# (clojure.core/defn ~(with-meta name {})
+                        ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
+                                :doc (str
+                                       (str "Inputs: " (if (= 1 (count raw-arglists))
+                                                         (first raw-arglists)
+                                                         (apply list raw-arglists)))
+                                       (when-let [ret (when (= (second defn-args) :-) (nth defn-args 2))]
+                                         (str "\n  Returns: " ret))
+                                       (when doc (str  "\n\n  " doc)))
+                                :raw-arglists (list 'quote raw-arglists)
+                                :arglists (list 'quote arglists)
+                                :schema schema-form)
+                        ~@fn-body)]
+             (utils/declare-class-schema! (utils/fn-schema-bearer ~name) ~schema-form)
+             ret#))))))
 
 #?(:clj
 (defmacro defmethod
@@ -1423,10 +1422,11 @@
          ~methodfn)
        ~#?(:bb `(let [methodfn# ~methodfn]
                   (clojure.core/defmethod ~multifn ~dispatch-val [& args#] (apply methodfn# args#)))
-           :default `(. ~(with-meta multifn {:tag 'clojure.lang.MultiFn})
-                        addMethod
-                        ~dispatch-val
-                        ~methodfn))))))
+           :default `(do ~@(macros/register-class-preds &env )
+                         (. ~(with-meta multifn {:tag 'clojure.lang.MultiFn})
+                            addMethod
+                            ~dispatch-val
+                            ~methodfn)))))))
 
 (defonce
   ^{:doc
@@ -1498,7 +1498,8 @@
                             ~@opts
                             ~@sigs)
         instrument? (instrument-defprotocol?)]
-    `(do ~defprotocol-form
+    `(do ~@(macros/register-class-preds &env (map :schema-form parsed-sigs))
+         ~defprotocol-form
          ;; put everything that relies on protocol implementation details here so the user can
          ;; turn it off for whatever reason.
          ~@(when instrument?
@@ -1575,12 +1576,14 @@
         [doc-string? more-def-args] (if (= (count more-def-args) 2)
                                       (macros/maybe-split-first string? more-def-args)
                                       [nil more-def-args])
-        init (first more-def-args)]
+        init (first more-def-args)
+        schema-form (macros/extract-schema-form name)]
     (macros/assert! (= 1 (count more-def-args)) "Illegal args passed to schema def: %s" def-args)
-    `(let [output-schema# ~(macros/extract-schema-form name)]
-       (def ~name
-         ~@(when doc-string? [doc-string?])
-         (validate output-schema# ~init))))))
+    `(do ~@(macros/register-class-preds &env schema-form)
+         (let [output-schema# ~schema-form]
+           (def ~name
+             ~@(when doc-string? [doc-string?])
+             (validate output-schema# ~init)))))))
 
 #?(:clj
 (set! *warn-on-reflection* false))
