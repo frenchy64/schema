@@ -3,7 +3,8 @@
   (:refer-clojure :exclude [simple-symbol?])
   (:require
    [clojure.string :as str]
-   [schema.utils :as utils]))
+   [schema.utils :as utils]
+   [clojure.walk :as walk]))
 
 ;; can remove this once we drop Clojure 1.8 support
 (defn- simple-symbol? [x]
@@ -116,8 +117,17 @@
   type hints when possible.
 
   A valid tag is a primitive, Class, or Var containing a Class."
-  [_env tag]
-  (utils/type-hint tag nil))
+  [env tag]
+  (when (symbol? tag)
+    (let [resolved (delay (resolve env tag))]
+      (cond
+        (or (primitive-sym? tag) (class? @resolved))
+        tag
+
+        (var? @resolved)
+        (let [v (var-get @resolved)]
+          (when (class? v)
+            (symbol (.getName ^Class v))))))))
 
 (defn normalized-metadata
   "Take an object with optional metadata, which may include a :tag,
@@ -587,3 +597,23 @@
    See (doc compile-fn-validation?) for all conditions which control fn validation compilation"
   [on?]
   (reset! *compile-fn-validation* on?))
+
+(defn register-class-preds
+  "Collect the likely Class's referred to by this form and return forms to
+  register their fast predicates."
+  [&env form]
+  (let [candidates (atom [])
+        _ (walk/postwalk (fn [form]
+                           (when (symbol? form)
+                             (let [c (resolve &env form)
+                                   ;; (def a Class) is a common idiom because (defschema a Class) doesn't work
+                                   c (cond-> c (var? c) deref)]
+                               (when (class? c)
+                                 (swap! candidates conj c))))
+                           form)
+                         form)]
+    (map (fn [^Class cls]
+           (let [cls-sym (symbol (.getName cls))]
+             `(or (utils/get-class-pred ~cls-sym)
+                  (utils/register-class-pred! ~cls-sym #(instance? ~cls-sym %)))))
+         @candidates)))
