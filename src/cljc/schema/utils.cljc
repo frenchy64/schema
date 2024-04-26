@@ -184,7 +184,8 @@
          (.put class->pred cls pred))
        pred)
      (defn get-class-pred [cls]
-       (.get class->pred cls))))
+       (or (.get class->pred cls)
+           (register-class-pred! cls (eval `#(instance? ~cls %)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Utilities for fast-as-possible reference to use to turn fn schema validation on/off

@@ -46,7 +46,7 @@
              (fn [f o]
                (option-step o params f))
              (fn [x] (macros/validation-error this x (err-f (utils/value-name x))))
-             (reverse options))]
+             (rseq options))]
       (if post
         (fn [x]
           (or (pre x)
@@ -56,7 +56,15 @@
                   (or (post (if (:return-walked? params) v x)) v)))))
         (fn [x]
           (or (pre x)
-              (t x)))))))
+              (t x))))))
+  spec/PredSpec
+  (pred [this params]
+    (when-not post
+        #_;;TODO
+      (when-some [pred (spec/pred ?? how to get spec)]
+        (reduce (fn [p {:keys [schema]}]
+                  (if-some [(spec/pred (s/spec schema))]))
+                pre (rseq options))))))
 
 (defn variant-spec
   "A variant spec represents a choice between a set of alternative
@@ -84,4 +92,4 @@
     ]
      (macros/assert! (or err-f (nil? (:guard (last options))))
                      "when last option has a guard, err-f must be provided")
-     (->VariantSpec pre options err-f post)))
+     (->VariantSpec pre (vec options) err-f post)))

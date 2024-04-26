@@ -123,9 +123,17 @@
   "Compile an efficient checker for schema, which returns nil for valid values and
    error descriptions otherwise."
   [schema]
-  (comp utils/error-val
-        (spec/run-checker
-         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)))
+  (let [pred (spec/run-pred (clojure.core/fn [s params] (spec/pred (spec s) params))
+                            schema)
+        explainer (comp utils/error-val
+                        (spec/run-checker
+                          (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))]
+    (prn "pred" pred)
+    (if-not pred
+      explainer
+      #(if (pred %)
+         nil
+         (explainer %)))))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -140,6 +148,7 @@
   "Compile an efficient validator for schema."
   [schema]
   (let [c (checker schema)]
+    (prn "checker" c)
     (clojure.core/fn [value]
       (when-let [error (c value)]
         (macros/error! (utils/format* "Value does not match schema: %s" (pr-str error))
@@ -160,22 +169,26 @@
 ;; function prototype checks objects for compatibility. In BB, defrecord classes can also be
 ;; instances of sci.lang.Type, and the interpreter extends `instance?` to support it as first arg.
 
-(clojure.core/defn instance-precondition [s klass]
-  (spec/precondition
-   s
-   #?(:bb #(instance? klass %)
-      :clj (or (utils/get-class-pred klass)
-               (utils/register-class-pred! klass (eval `#(instance? ~klass %))))
-      :cljs #(and (not (nil? %))
-                  (or (identical? klass (.-constructor %))
-                      (js* "~{} instanceof ~{}" % klass))))
-   #(list 'instance? klass %)))
+(clojure.core/defn instance-pred [klass]
+  #?(:bb #(instance? klass %)
+     :clj (or (utils/get-class-pred klass)
+              (utils/register-class-pred! klass (eval `#(instance? ~klass %))))
+     :cljs #(and (not (nil? %))
+                 (or (identical? klass (.-constructor %))
+                     (js* "~{} instanceof ~{}" % klass)))))
+
+(clojure.core/defn instance-precondition
+  ([s klass] (instance-precondition s klass (instance-pred klass)))
+  ([s klass pred] (spec/precondition s pred #(list 'instance? klass %))))
 
 (defn- -class-spec [this]
-  (let [pre (instance-precondition this this)]
+  (let [pred (instance-pred this)
+        pre (instance-precondition this this pred)]
+    (prn "-class-spec" this pre)
     (if-let [class-schema (utils/class-schema this)]
       (variant/variant-spec pre [{:schema class-schema}])
-      (leaf/leaf-spec pre))))
+      (assoc (leaf/leaf-spec pre)
+             :pred pred))))
 
 (defn- -class-explain [this]
   (if-let [more-schema (utils/class-schema this)]
@@ -201,6 +214,10 @@
            (spec [this] (-class-spec this))
            (explain [this] (-class-explain this))]))
 
+(extend-protocol spec/PredSpec
+  #?(:clj Class
+     :cljs function)
+  (pred [this params] (spec/pred (-class-spec this) params)))
 
 ;; On the JVM, the primitive coercion functions (double, long, etc)
 ;; alias to the corresponding boxed number classes
@@ -636,7 +653,19 @@
            (if (utils/error? tx)
              tx
              (f (or tx x))))))
-     (map #(spec/sub-checker {:schema %} params) (reverse schemas)))))
+     (map #(spec/sub-checker {:schema %} params) (rseq schemas))))
+  spec/PredSpec
+  (pred [this params]
+    (reduce
+     (clojure.core/fn [f [s t]]
+       (if (nil? t)
+         (do (when-not (= "true" (System/getProperty "schema.core.no-perf-warn"))
+               (println (str "WARNING: No fast pred found for " (class s))))
+             (reduced nil))
+         (clojure.core/fn [x]
+           (and (t x) (f x)))))
+     (clojure.core/fn [_] true)
+     (map (juxt identity #(spec/sub-pred {:schema %} params)) (rseq schemas)))))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} both
   "A value that must satisfy every schema in schemas.
@@ -646,7 +675,7 @@
 
    When used with coercion, coerces each schema in sequence."
   [& schemas]
-  (Both. schemas))
+  (Both. (vec schemas)))
 
 
 (clojure.core/defn if
@@ -700,11 +729,12 @@
 (macros/defrecord-schema Atomic [schema]
   Schema
   (spec [this]
-    (collection/collection-spec
-     (spec/simple-precondition this atom?)
-     clojure.core/atom
-     [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
-     (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))))
+    (-> (collection/collection-spec
+          (spec/simple-precondition this atom?)
+          clojure.core/atom
+          [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
+          (clojure.core/fn [_ xs _] (clojure.core/atom (first xs))))
+        (assoc :base-pred atom?)))
   (explain [this] (list 'atom (explain schema))))
 
 (clojure.core/defn atom

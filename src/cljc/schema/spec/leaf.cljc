@@ -10,7 +10,11 @@
   spec/CoreSpec
   (subschemas [this] nil)
   (checker [this params]
-    (fn [x] (or (pre x) x))))
+    (fn [x] (or (pre x) x)))
+  spec/PredSpec
+  (pred [this params] (or (-> this meta :pred)
+                          #_
+                          (comp nil? pre))))
 
 (defn leaf-spec
   "A leaf spec represents an atomic datum that is checked completely
