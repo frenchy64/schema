@@ -258,12 +258,11 @@
                             {:pre spec/+no-precondition+
                              :options [{:schema ~class-sym}]
                              :params->pred (cc/fn [_#] #(instance? ~class-sym %))
-                             :params->pre-pred (cc/fn [_#] any?)}))
-             sym# '~cast-sym]
+                             :params->pre-pred (cc/fn [_#] any?)}))]
          (extend-protocol Schema
            ~qualified-cast-sym
            (spec [_#] @spec#)
-           (explain [_#] sym#)))))
+           (explain [_#] '~cast-sym)))))
 
   (extend-primitive double Double)
   (extend-primitive float Float)
@@ -288,12 +287,14 @@
 
 ;;; Any matches anything (including nil)
 
+(def ^:private -Anything-spec (delay (leaf/leaf-spec spec/+no-precondition+ any?)))
+
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
   ;; loses type info, which makes this unusable in schema-fn.
   ;; http://dev.clojure.org/jira/browse/CLJ-1093
   Schema
-  (spec [this] (leaf/leaf-spec spec/+no-precondition+ any?))
+  (spec [this] @-Anything-spec)
   (explain [this] 'Any))
 
 (def Any
@@ -303,17 +304,28 @@
 
 ;;; eq (to a single allowed value)
 
+(defn ^:private -Eq-explain [v]
+  (list 'eq v))
+
+(defn ^:private -Eq-spec [this v]
+  (let [pred #(= v %)]
+    (leaf/leaf-spec (spec/precondition this pred #(list '= v %))
+                    pred)))
+
 (macros/defrecord-schema EqSchema [v]
   Schema
-  (spec [this] (let [pred #(= v %)]
-                 (leaf/leaf-spec (spec/precondition this pred #(list '= v %))
-                                 pred)))
-  (explain [this] (list 'eq v)))
+  (spec [this] (or (force (::spec this))
+                   (-Eq-spec this v)))
+  (explain [this] (or (force (::explain this))
+                      (-Eq-explain v))))
 
 (clojure.core/defn eq
   "A value that must be (= v)."
   [v]
-  (EqSchema. v))
+  (let [this (EqSchema. v)]
+    (assoc this
+           ::spec (delay (-Eq-spec this v))
+           ::explain (delay (-Eq-explain v)))))
 
 
 ;;; isa (a child of parent)
@@ -337,17 +349,30 @@
 
 ;;; enum (in a set of allowed values)
 
+(defn ^:private -Enum-spec [this vs]
+  (let [pred #(contains? vs %)]
+    (leaf/leaf-spec (spec/precondition this pred #(list vs %))
+                    pred)))
+
+(defn ^:private -Enum-explain [vs]
+  (cons 'enum vs))
+
 (macros/defrecord-schema EnumSchema [vs]
   Schema
-  (spec [this] (let [pred #(contains? vs %)]
-                 (leaf/leaf-spec (spec/precondition this pred #(list vs %))
-                                 pred)))
-  (explain [this] (cons 'enum vs)))
+  (spec [this] (or (force (::spec this))
+                   (-Enum-spec this vs)))
+  (explain [this] (or (force (::explain this))
+                      (-Enum-explain vs))))
 
 (clojure.core/defn enum
   "A value that must be = to some element of vs."
   [& vs]
-  (EnumSchema. (set vs)))
+  (let [vs' (set vs)
+        this (EnumSchema. vs')]
+    (assoc this
+           ::spec (delay (-Enum-spec this vs'))
+           ::explain (delay (-Enum-explain vs)))))
+
 
 
 ;;; pred (matches all values for which p? returns truthy)
