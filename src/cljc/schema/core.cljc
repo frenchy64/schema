@@ -1165,15 +1165,27 @@
 
 (macros/defrecord-schema Record [klass schema]
   Schema
-  (spec [this]
-    (collection/collection-spec
-     (let [p (spec/precondition this #(instance? klass %) #(list 'instance? klass %))]
-       (if-let [evf (:extra-validator-fn this)]
-         (some-fn p (spec/precondition this evf #(list 'passes-extra-validation? %)))
-         p))
-     (:konstructor (meta this))
-     (map-elements schema)
-     (map-error)))
+  (spec [{:keys [extra-validator-fn] :as this}]
+    (let [pre-pred (instance-pred klass)]
+      (collection/collection-spec
+        {:pre
+         (let [pre (spec/precondition this pre-pred #(list 'instance? klass %))]
+           (if-some [extra (when extra-validator-fn
+                             (spec/precondition this extra-validator-fn #(list 'passes-extra-validation? %)))]
+             #(or (pre %) (extra %))
+             pre))
+         :konstructor
+         (:konstructor (meta this))
+         :options
+         (map-elements schema)
+         :on-error
+         (map-error)
+         :parent this
+         :params->pred (fn []
+                         (if extra-validator-fn
+                           #(and (pre-pred %) (extra-validator-fn %))
+                           pre-pred))
+         :params->pre-pred (fn [_] pre-pred)})))
   (explain [this]
     (list 'record #?(:clj (or #?(:bb (when (instance? sci.lang.Type klass)
                                        (symbol (str klass))))
@@ -1224,7 +1236,8 @@
 
 (macros/defrecord-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
   Schema
-  (spec [this] (leaf/leaf-spec (spec/simple-precondition this ifn?)))
+  (spec [this] (leaf/leaf-spec (spec/simple-precondition this ifn?)
+                               ifn?))
   (explain [this]
     (if (> (count input-schemas) 1)
       (list* '=>* (explain output-schema) (map explain-input-schema input-schemas))
