@@ -81,7 +81,11 @@
                   res #?(:clj res :cljs @res)]
               (if (or (seq remaining) (has-error? res))
                 (utils/error (on-error x res remaining))
-                (konstructor res))))))))
+                (konstructor res)))))))
+  spec/PredSpec
+  (pred [{:keys [params->pred]} params] (params->pred params))
+  spec/PrePredSpec
+  (pre-pred [{:keys [params->pre-pred]} params] (params->pre-pred params)))
 
 (defn collection-spec
   "A collection represents a collection of elements, each of which is itself

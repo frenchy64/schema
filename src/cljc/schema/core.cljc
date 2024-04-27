@@ -130,12 +130,12 @@
   [schema]
   (let [explainer (comp utils/error-val
                         (spec/run-checker
-                          (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))]
-    (if-some [pred (predicate schema)]
-      #(if (try (pred %) (catch Throwable _))
-         nil
-         (explainer %))
-      (do (prn "NONE" schema) #_(assert nil schema) explainer))))
+                          (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))
+        pred (spec/pred (spec schema) nil)]
+    (assert pred schema)
+    #(if (try (pred %) (catch Throwable _))
+       nil
+       (explainer %))))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -150,7 +150,6 @@
   "Compile an efficient validator for schema."
   [schema]
   (let [c (checker schema)]
-    (prn "checker" c)
     (clojure.core/fn [value]
       (when-let [error (c value)]
         (macros/error! (utils/format* "Value does not match schema: %s" (pr-str error))
@@ -163,6 +162,9 @@
    a 'validator' once and call it on each of them."
   [schema value]
   ((validator schema) value))
+
+(defn- any? [_] true)
+(defn- never? [_] false)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Platform-specific leaf Schemas
@@ -230,8 +232,8 @@
            (variant/variant-spec
              {:pre spec/+no-precondition+
               :options [{:schema ~class-sym}]
-              :params->pred (fn [_#] #(instance? ~class-sym %))
-              :params->pre-pred any?}))
+              :params->pred (cc/fn [_#] #(instance? ~class-sym %))
+              :params->pre-pred (cc/fn [_#] any?)}))
          (explain [this#]
            '~cast-sym))))
 
@@ -257,9 +259,6 @@
 ;;; Cross-platform Schema leaves
 
 ;;; Any matches anything (including nil)
-
-(defn- any? [_] true)
-(defn- never? [_] false)
 
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
@@ -678,10 +677,10 @@
      {:pre spec/+no-precondition+
       :options [{:schema schema}]
       :post (spec/precondition this postcondition #(list post-name %))
-      :params->pred (fn [params]
+      :params->pred (cc/fn [params]
                       (let [pred (spec/pred (spec schema) params)]
                         #(and (pred %) (postcondition %))))
-      :params->pre-pred (fn [_] any?)}))
+      :params->pre-pred (cc/fn [_] any?)}))
   (explain [this]
     (list 'constrained (explain schema) post-name)))
 
@@ -797,18 +796,17 @@
 (macros/defrecord-schema Atomic [schema]
   Schema
   (spec [this]
-    (-> (collection/collection-spec
-          {:pre (spec/simple-precondition this atom?)
-           :konstructor clojure.core/atom
-           :elements
-           [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
-           :on-error
-           (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))
-           :params->pred (fn [params]
-                           (let [p (spec/pred (spec schema) params)]
-                             #(and (atom? %) (p %))))
-           :params->pre-pred (fn [_] atom?)})
-        (assoc :base-pred atom?)))
+    (collection/collection-spec
+      {:pre (spec/simple-precondition this atom?)
+       :konstructor clojure.core/atom
+       :elements
+       [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
+       :on-error
+       (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))
+       :params->pred (cc/fn [params]
+                       (let [p (spec/pred (spec schema) params)]
+                         #(and (atom? %) (p %))))
+       :params->pre-pred (cc/fn [_] atom?)}))
   (explain [this] (list 'atom (explain schema))))
 
 (clojure.core/defn atom
@@ -1009,10 +1007,10 @@
       :konstructor set
       :options [(collection/all-elements (first this))]
       :on-error (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))
-      :params->pred (fn [params]
+      :params->pred (cc/fn [params]
                       (let [p (spec/pred (spec (first this)) params)]
                         #(and (set? %) (p %))))
-      :params->pre-pred (fn [_] set?)}))
+      :params->pre-pred (cc/fn [_] set?)}))
   (explain [this] (set [(explain (first this))])))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1141,8 +1139,8 @@
         (let [head (mapv utils/error-val elts)]
           (cond-> head
             (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))
-      :params->pred (fn [_] (assert nil 'TODO))
-      :params->pre-pred (fn [_] sequential-schema-pre-pred)}))
+      :params->pred (cc/fn [_] (assert nil 'TODO))
+      :params->pre-pred (cc/fn [_] sequential-schema-pre-pred)}))
   (explain [this]
     (let [[singles multi] (parse-sequence-schema this)]
       (cond-> (mapv (clojure.core/fn [^One s]
@@ -1181,11 +1179,11 @@
          :on-error
          (map-error)
          :parent this
-         :params->pred (fn []
+         :params->pred (cc/fn [_]
                          (if extra-validator-fn
                            #(and (pre-pred %) (extra-validator-fn %))
                            pre-pred))
-         :params->pre-pred (fn [_] pre-pred)})))
+         :params->pre-pred (cc/fn [_] pre-pred)})))
   (explain [this]
     (list 'record #?(:clj (or #?(:bb (when (instance? sci.lang.Type klass)
                                        (symbol (str klass))))
