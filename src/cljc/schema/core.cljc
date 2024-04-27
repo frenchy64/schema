@@ -75,7 +75,7 @@
    See the docstrings of defrecord, fn, and defn for more details about how
    to use these macros."
   ;; don't exclude def because it's not a var.
-  (:refer-clojure :exclude [Keyword Symbol Inst atom defprotocol defrecord defn letfn defmethod fn MapEntry ->MapEntry])
+  (:refer-clojure :exclude [Keyword Symbol Inst atom defprotocol defrecord defn letfn defmethod fn MapEntry ->MapEntry any?])
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
@@ -258,12 +258,14 @@
 
 ;;; Any matches anything (including nil)
 
+(defn- any? [_] true)
+
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
   ;; loses type info, which makes this unusable in schema-fn.
   ;; http://dev.clojure.org/jira/browse/CLJ-1093
   Schema
-  (spec [this] (leaf/leaf-spec spec/+no-precondition+))
+  (spec [this] (leaf/leaf-spec spec/+no-precondition+ any?))
   (explain [this] 'Any))
 
 (def Any
@@ -290,11 +292,11 @@
 
 (macros/defrecord-schema Isa [h parent]
   Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this
-                                                  #(if h
-                                                     (isa? h % parent)
-                                                     (isa? % parent))
-                                                  #(list 'isa? % parent))))
+  (spec [this] (let [pred (if h
+                            #(isa? h % parent)
+                            #(isa? % parent))]
+                 (leaf/leaf-spec (spec/precondition this pred #(list 'isa? % parent))
+                                 pred)))
   (explain [this] (list 'isa? parent)))
 
 (clojure.core/defn isa
@@ -324,7 +326,8 @@
 
 (macros/defrecord-schema Predicate [p? pred-name]
   Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this p? #(list pred-name %))))
+  (spec [this] (leaf/leaf-spec (spec/precondition this p? #(list pred-name %))
+                               p?))
   (explain [this]
     (cond (= p? integer?) 'Int
           (= p? keyword?) 'Keyword
@@ -352,11 +355,13 @@
 (macros/defrecord-schema Protocol [p]
   Schema
   (spec [this]
-    (leaf/leaf-spec
-     (spec/precondition
-      this
-      (:proto-pred (meta this))
-      #(list 'satisfies? (protocol-name this) %))))
+    (let [pred (:proto-pred (meta this))]
+      (leaf/leaf-spec
+        (spec/precondition
+          this
+          pred
+          #(list 'satisfies? (protocol-name this) %))
+        pred)))
   (explain [this] (list 'protocol (protocol-name this))))
 
 ;; The cljs version is macros/protocol by necessity, since cljs `satisfies?` is a macro.
@@ -452,13 +457,26 @@
 
 ;;; maybe (nil)
 
+(def ^{:private true} nil-schema (eq nil))
+
 (macros/defrecord-schema Maybe [schema]
   Schema
   (spec [this]
-    (variant/variant-spec
-     spec/+no-precondition+
-     [{:guard nil? :schema (eq nil)}
-      {:schema schema}]))
+    (reify
+      spec/CoreSpec
+      (subschemas [_] [nil-schema schema])
+      (checker [this params]
+        (let [chk (checker schema params)]
+          (fn [x]
+            (when (some? x)
+              (chk x)))))
+      spec/PredSpec
+      (pred [this params]
+        (let [p? (pred schema params)]
+          (assert p?)
+          (fn [x]
+            (or (nil? x)
+                (p? x)))))))
   (explain [this] (list 'maybe (explain schema))))
 
 (clojure.core/defn maybe
@@ -472,9 +490,15 @@
 (macros/defrecord-schema NamedSchema [schema name]
   Schema
   (spec [this]
-    (variant/variant-spec
-     spec/+no-precondition+
-     [{:schema schema :wrap-error #(utils/->NamedError name %)}]))
+    (reify
+      spec/CoreSpec
+      (subschemas [_] [schema])
+      (checker [this params]
+        (let [chk (checker schema params)]
+          (fn [x]
+            (some->> (chk x) (utils/->NamedError name)))))
+      spec/PredSpec
+      (pred [this params] (pred schema params))))
   (explain [this] (list 'named (explain schema) name)))
 
 (clojure.core/defn named
@@ -488,12 +512,25 @@
 (macros/defrecord-schema Either [schemas]
   Schema
   (spec [this]
-    (variant/variant-spec
-     spec/+no-precondition+
-     (for [s schemas]
-       {:guard (predicate s) ;; since the guard determines which option we check against
-        :schema s})
-     #(list 'some-matching-either-clause? %)))
+        (reify
+          spec/CoreSpec
+          (subschemas [_] schemas)
+          (checker [this params]
+            (let [chks (mapv (fn [s]
+                               [(spec/pred s params) (spec/checker s params)])
+                             schemas)
+                  none-matched (gensym)]
+              (fn [x]
+                (let [r (reduce
+                          (fn [none-matched [p? chk]]
+                            ;; not exactly the "guard", I think this should be the precondition, not the pred - Ambrose
+                            (if (p? x) ;; since the guard determines which option we check against
+                              (reduced (chk x))
+                              none-matched))
+                          none-matched chks)]
+                  (if (identical? none-matched r)
+                    (list 'some-matching-either-clause? (utils/value-name x))
+                    r)))))))
   (explain [this] (cons 'either (map explain schemas))))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
@@ -515,6 +552,32 @@
 (macros/defrecord-schema ConditionalSchema [preds-and-schemas error-symbol]
   Schema
   (spec [this]
+    (let [preds (mapv first preds-and-schemas)
+          schemas (mapv second preds-and-schemas)
+          none-matched (gensym)]
+      (reify
+        spec/CoreSpec
+        (subschemas [this] schemas)
+        (checker [this params]
+          (let [t (reduce
+                    (fn [f o]
+                      (option-step o params f))
+                    (fn [x] (macros/validation-error this x (err-f (utils/value-name x))))
+                    (rseq options))]
+            #_ ;;TODO this is just a copy-paste of Either, actually implement it
+            (fn [x]
+              (let [r (reduce
+                        (fn [none-matched [p? chk]]
+                          ;; not exactly the "guard" - Ambrose
+                          (if (p? x) ;; since the guard determines which option we check against
+                            (reduced (chk x))
+                            none-matched))
+                        none-matched chks)]
+                (if (identical? none-matched r)
+                  (list 'some-matching-either-clause? (utils/value-name x))
+                  r)))))
+        ))
+    #_
     (variant/variant-spec
      spec/+no-precondition+
      (for [[p s] preds-and-schemas]
