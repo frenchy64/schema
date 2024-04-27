@@ -463,22 +463,19 @@
 (macros/defrecord-schema Maybe [schema]
   Schema
   (spec [this]
-    (reify
-      spec/CoreSpec
-      (subschemas [_] [nil-schema schema])
-      (checker [this params]
-        (let [chk (checker schema params)]
-          (fn [x]
-            (when (some? x)
-              (chk x)))))
-      spec/PredSpec
-      (pred [this params]
+    (variant/variant-spec
+     spec/+no-precondition+
+     [{:guard nil? :schema (eq nil)}
+      {:schema schema}]))
+  (explain [this] (list 'maybe (explain schema))))
+
+#_
+(pred [this params]
         (let [p? (pred schema params)]
           (assert p?)
           (fn [x]
             (or (nil? x)
-                (p? x)))))))
-  (explain [this] (list 'maybe (explain schema))))
+                (p? x)))))
 
 (clojure.core/defn maybe
   "A value that must either be nil or satisfy schema"
@@ -491,16 +488,11 @@
 (macros/defrecord-schema NamedSchema [schema name]
   Schema
   (spec [this]
-    (reify
-      spec/CoreSpec
-      (subschemas [_] [schema])
-      (checker [this params]
-        (let [chk (checker schema params)]
-          (fn [x]
-            (some->> (chk x) (utils/->NamedError name)))))
-      spec/PredSpec
-      (pred [this params] (pred schema params))))
+    (variant/variant-spec
+     spec/+no-precondition+
+     [{:schema schema :wrap-error #(utils/->NamedError name %)}]))
   (explain [this] (list 'named (explain schema) name)))
+#_(pred [this params] (pred schema params))
 
 (clojure.core/defn named
   "A value that must satisfy schema, and has a name for documentation purposes."
@@ -513,30 +505,20 @@
 (macros/defrecord-schema Either [schemas]
   Schema
   (spec [this]
-        (reify
-          spec/CoreSpec
-          (subschemas [_] schemas)
-          (checker [this params]
-            (reduce
-              (fn [f s]
-                ;; not exactly the "guard", I think this should be the precondition, not the pred - Ambrose
-                (let [p? (spec/pred s params) ;; since the guard determines which option we check against
-                      chk (spec/checker s params)]
-                  (fn [x]
-                    (if (p? x)
-                      (chk x)
-                      (f x)))))
-              (fn [x] (macros/validation-error this x (list 'some-matching-either-clause? (utils/value-name x))))
-              (rseq schemas)))
-          spec/PredSpec
-          (pred [this params]
+    (variant/variant-spec
+     spec/+no-precondition+
+     (for [s schemas]
+       {:guard (complement (checker s)) ;; since the guard determines which option we check against
+        :schema s})
+     #(list 'some-matching-either-clause? %)))
+  (explain [this] (cons 'either (map explain schemas))))
+#_(pred [this params]
             (reduce
               (fn [f s]
                 (let [p? (spec/pred s params)]
                   (fn [x]
                     (and (p? x) (f x)))))
-              never? (rseq schemas)))))
-  (explain [this] (cons 'either (map explain schemas))))
+              never? (rseq schemas)))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
   "A value that must satisfy at least one schema in schemas.
@@ -557,28 +539,22 @@
 (macros/defrecord-schema ConditionalSchema [preds-and-schemas error-symbol]
   Schema
   (spec [this]
-    (let [schemas (delay (mapv second preds-and-schemas))
-          error-symbol (delay
-                         (or error-symbol
-                             (if (= 1 (count preds-and-schemas))
-                               (symbol (utils/fn-name (ffirst preds-and-schemas)))
-                               'some-matching-condition?)))]
-      (reify
-        spec/CoreSpec
-        (subschemas [this] @schemas)
-        (checker [this params]
-          (reduce
-            (fn [f [guard s]]
-              (let [chk (spec/checker s params)]
-                (fn [x]
-                  (if (guard x)
-                    (chk x)
-                    (f x)))))
-            (fn [x] (macros/validation-error this x (list @error-symbol (utils/value-name x))))
-            (rseq preds-and-schemas)))
-
-        spec/PredSpec
-        (pred [this params]
+    (variant/variant-spec
+     spec/+no-precondition+
+     (for [[p s] preds-and-schemas]
+       {:guard p :schema s})
+     #(list (or error-symbol
+                (if (= 1 (count preds-and-schemas))
+                  (symbol (utils/fn-name (ffirst preds-and-schemas)))
+                  'some-matching-condition?))
+            %)))
+  (explain [this]
+    (cons 'conditional
+          (concat
+           (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
+                   preds-and-schemas)
+           (when error-symbol [error-symbol])))))
+#_(pred [this params]
           (reduce
             (fn [f [guard s]]
               (let [pred (spec/pred s params)]
@@ -586,13 +562,7 @@
                   (if (guard x)
                     (pred x)
                     (f x)))))
-            never? (rseq preds-and-schemas))))))
-  (explain [this]
-    (cons 'conditional
-          (concat
-           (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
-                   preds-and-schemas)
-           (when error-symbol [error-symbol])))))
+            never? (rseq preds-and-schemas)))
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -634,14 +604,13 @@
 
   schema.spec.variant.VariantSpec
   (precondition [^schema.spec.variant.VariantSpec this]
-    (let [pred (predicate this)]
-      (every-pred
-        (complement (.-pre this))
-        (apply some-fn
-               (for [{:keys [guard schema]} (.-options this)]
-                 (if guard
-                   (every-pred guard (precondition (spec schema)))
-                   (precondition (spec schema))))))))
+    (every-pred
+     (complement (.-pre this))
+     (apply some-fn
+            (for [{:keys [guard schema]} (.-options this)]
+              (if guard
+                (every-pred guard (precondition (spec schema)))
+                (precondition (spec schema)))))))
 
   schema.spec.collection.CollectionSpec
   (precondition [this]
