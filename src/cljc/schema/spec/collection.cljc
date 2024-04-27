@@ -13,14 +13,15 @@
 
 (declare sequence-transformer)
 
-(defn- element-transformer [e params then]
+(defn- element-transformer [e params then remaining-schema-allowed?]
   (if (vector? e)
     (case (first e)
       ::optional
-      (sequence-transformer (next e) params then)
+      (sequence-transformer (subvec e 1) params then)
 
       ::remaining
-      (let [_ (macros/assert! (= 2 (count e)) "remaining can have only one schema.")
+      (let [_ (macros/assert! remaining-schema-allowed? "Remaining schemas must be in tail position.")
+            _ (macros/assert! (= 2 (count e)) "remaining can have only one schema.")
             c (spec/sub-checker (second e) params)]
         #?(:clj (fn [^java.util.List res x]
                   (doseq [i x]
@@ -38,13 +39,14 @@
                  (then res (parser (fn [t] (swap! res conj (if (utils/error? t) t (c t)))) x)))))))
 
 (defn- sequence-transformer [elts params then]
-  (macros/assert! (not-any? #(and (vector? %) (= (first %) ::remaining)) (butlast elts))
-                  "Remaining schemas must be in tail position.")
-  (reduce
-   (fn [f e]
-     (element-transformer e params f))
-   then
-   (reverse elts)))
+  (if (zero? (count elts))
+    then
+    (let [start (element-transformer (peek elts) params then true)]
+      (reduce
+        (fn [f e]
+          (element-transformer e params f false))
+        start
+        (-> elts pop rseq)))))
 
 #?(:clj ;; for performance
 (defn- has-error? [^java.util.List l]
@@ -83,9 +85,16 @@
                 (utils/error (on-error x res remaining))
                 (konstructor res)))))))
   spec/PredSpec
-  (pred [{:keys [params->pred]} params] (params->pred params))
-  spec/PrePredSpec
-  (pre-pred [{:keys [params->pre-pred]} params] (params->pre-pred params)))
+  (pred [{:keys [pre-pred]} params]
+    (let [t (sequence-transformer elements params (fn [_ x] x))]
+      (fn [x]
+        (or (pre x)
+            (let [res #?(:clj (java.util.ArrayList.) :cljs (atom []))
+                  remaining (t res x)
+                  res #?(:clj res :cljs @res)]
+              (if (or (seq remaining) (has-error? res))
+                (utils/error (on-error x res remaining))
+                true)))))))
 
 (defn collection-spec
   "A collection represents a collection of elements, each of which is itself
@@ -104,9 +113,8 @@
    the user must ensure that the parser enforces the desired semantics, which
    should match the structure of the spec for proper generation."
   ([{:keys [pre konstructor elements on-error
-            params->pred params->pre-pred parent]}]
-   (cond-> (->CollectionSpec pre konstructor elements on-error)
-     params->pred (assoc :params->pred params->pred)
+            params->pre-pred parent]}]
+   (cond-> (->CollectionSpec pre konstructor (vec elements) on-error)
      params->pre-pred (assoc :params->pre-pred params->pre-pred)
      parent (assoc :parent parent)))
   ([pre ;- spec/Precondition
@@ -119,7 +127,7 @@
     ;;          where the last element can optionally be a [::remaining schema]
     on-error ;- (=> s/Any (s/named s/Any 'value) [(s/named s/Any 'checked-element)] [(s/named s/Any 'unmatched-element)])
     ]
-   (->CollectionSpec pre konstructor elements on-error)))
+   (->CollectionSpec pre konstructor (vec elements) on-error)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
