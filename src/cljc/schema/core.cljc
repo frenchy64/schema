@@ -963,14 +963,16 @@
                           rk)
                   m))))))
        (when extra-keys-schema
-         (let [specific-keys (set (map explicit-schema-key (keys without-extra-keys-schema)))
+         (let [specific-keys (into #{} (map explicit-schema-key) (keys without-extra-keys-schema))
                [ks vs] (find this extra-keys-schema)
                restricted-ks (constrained ks #(not (contains? specific-keys %)))]
            [(collection/all-elements (map-entry restricted-ks vs))]))))))
 
 (defn- map-error []
   (clojure.core/fn [_ elts extra]
-    (into {} (concat (keep utils/error-val elts) (for [[k _] extra] [k 'disallowed-key])))))
+    (-> {}
+        (into (keep utils/error-val) elts)
+        (into (map (cc/fn [[k]] [k 'disallowed-key])) extra))))
 
 (defn- map-spec [this]
   (collection/collection-spec
@@ -980,7 +982,9 @@
    (map-error)))
 
 (clojure.core/defn- map-explain [this]
-  (into {} (for [[k v] this] [(explain-kspec k) (explain v)])))
+  (reduce-kv (fn [m k v]
+               (assoc m (explain-kspec k) (explain v)))
+             {} this))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentMap
@@ -1011,7 +1015,7 @@
                       (let [p (spec/pred (spec (first this)) params)]
                         #(and (set? %) (p %))))
       :params->pre-pred (cc/fn [_] set?)}))
-  (explain [this] (set [(explain (first this))])))
+  (explain [this] #{(explain (first this))}))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Queue schemas
@@ -1024,6 +1028,10 @@
     #?(:clj clojure.lang.PersistentQueue
        :cljs cljs.core/PersistentQueue)
    x))
+
+(def ^:private empty-queue
+  #?(:clj clojure.lang.PersistentQueue/EMPTY
+     :cljs cljs.core/PersistentQueue.EMPTY))
 
 (clojure.core/defn as-queue [col]
   (reduce
@@ -1039,7 +1047,7 @@
      {:pre (spec/simple-precondition this queue?)
       :konstructor as-queue
       :options [(collection/all-elements schema)]
-      :on-error (clojure.core/fn [_ xs _] (as-queue (keep utils/error-val xs)))
+      :on-error (clojure.core/fn [_ xs _] (into empty-queue (keep utils/error-val) xs))
       :params->pred (cc/fn [params]
                       (let [p (spec/pred (spec schema) params)]
                         #(and (queue? %) (p %))))

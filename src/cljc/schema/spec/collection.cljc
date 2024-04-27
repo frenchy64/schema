@@ -148,7 +148,7 @@
 (defn all-elements [schema]
   (remaining
    {:schema schema
-    :parser (fn [coll] (macros/error! (str "should never be not called")))}))
+    :parser (fn [coll] (macros/error! (str "should never be called")))}))
 
 (defn one-element [required? schema parser]
   (let [base {:schema schema :parser parser}]
