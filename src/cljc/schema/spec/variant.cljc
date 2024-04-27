@@ -58,13 +58,13 @@
           (or (pre x)
               (t x))))))
   spec/PredSpec
-  (pred [this params]
-    (when-not post
-        #_;;TODO
-      (when-some [pred (spec/pred ?? how to get spec)]
-        (reduce (fn [p {:keys [schema]}]
-                  (if-some [(spec/pred (s/spec schema))]))
-                pre (rseq options))))))
+  (pred [{:keys [params->pred] :as this} params]
+    (assert params->pred (:parent this))
+    (params->pred params))
+  spec/PrePredSpec
+  (pre-pred [{:keys [params->pre-pred] :as this} params]
+    (assert params->pre-pred (:parent this))
+    (params->pre-pred params)))
 
 (defn variant-spec
   "A variant spec represents a choice between a set of alternative
@@ -79,6 +79,12 @@
    err-f is a function to produce an error message if none
    of the guards match (and must be passed unless the last option has no
    guard)."
+  ([{:keys [pre options err-f post params->pred params->pre-pred]}]
+   (macros/assert! (or err-f (nil? (:guard (last options))))
+                   "when last option has a guard, err-f must be provided")
+   (cond-> (->VariantSpec pre (vec options) err-f post)
+     params->pred (assoc :params->pred params->pred)
+     params->pre-pred (assoc :params->pre-pred params->pre-pred)))
   ([pre options]
      (variant-spec pre options nil))
   ([pre options err-f]
@@ -90,6 +96,4 @@
     err-f ;- (s/pred fn?)
     post ;- (s/maybe spec/Precondition)
     ]
-     (macros/assert! (or err-f (nil? (:guard (last options))))
-                     "when last option has a guard, err-f must be provided")
-     (->VariantSpec pre (vec options) err-f post)))
+     (variant-spec {:pre pre :options options :err-f err-f :post :post})))

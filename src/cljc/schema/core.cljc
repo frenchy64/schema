@@ -186,11 +186,12 @@
 (defn- -class-spec [this]
   (let [pred (instance-pred this)
         pre (instance-precondition this this pred)]
-    (prn "-class-spec" this pre)
     (if-let [class-schema (utils/class-schema this)]
-      (variant/variant-spec pre [{:schema class-schema}])
-      (assoc (leaf/leaf-spec pre)
-             :pred pred))))
+      (variant/variant-spec
+        {:pre pre :options [{:schema class-schema}]
+         :parent this :params->pred (cc/fn [_] pred)
+         :params->pre-pred (cc/fn [_] pred)})
+      (leaf/leaf-spec pre pred))))
 
 (defn- -class-explain [this]
   (if-let [more-schema (utils/class-schema this)]
@@ -216,11 +217,6 @@
            (spec [this] (-class-spec this))
            (explain [this] (-class-explain this))]))
 
-(extend-protocol spec/PredSpec
-  #?(:clj Class
-     :cljs function)
-  (pred [this params] (spec/pred (-class-spec this) params)))
-
 ;; On the JVM, the primitive coercion functions (double, long, etc)
 ;; alias to the corresponding boxed number classes
 
@@ -231,7 +227,11 @@
       `(extend-protocol Schema
          ~qualified-cast-sym
          (spec [this#]
-           (variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}]))
+           (variant/variant-spec
+             {:pre spec/+no-precondition+
+              :options [{:schema ~class-sym}]
+              :params->pred (fn [_#] #(instance? ~class-sym %))
+              :params->pre-pred any?}))
          (explain [this#]
            '~cast-sym))))
 
@@ -464,18 +464,17 @@
   Schema
   (spec [this]
     (variant/variant-spec
-     spec/+no-precondition+
-     [{:guard nil? :schema (eq nil)}
-      {:schema schema}]))
+      {:pre spec/+no-precondition+
+       :options [{:guard nil? :schema (eq nil)}
+                 {:schema schema}]
+       :parent this
+       :params->pred (cc/fn [params]
+                       (let [p? (spec/pred (spec schema) params)]
+                         (assert p?)
+                         (cc/fn [x]
+                           (or (nil? x)
+                               (p? x)))))}))
   (explain [this] (list 'maybe (explain schema))))
-
-#_
-(pred [this params]
-        (let [p? (pred schema params)]
-          (assert p?)
-          (fn [x]
-            (or (nil? x)
-                (p? x)))))
 
 (clojure.core/defn maybe
   "A value that must either be nil or satisfy schema"
@@ -489,10 +488,11 @@
   Schema
   (spec [this]
     (variant/variant-spec
-     spec/+no-precondition+
-     [{:schema schema :wrap-error #(utils/->NamedError name %)}]))
+     {:pre spec/+no-precondition+
+      :options [{:schema schema :wrap-error #(utils/->NamedError name %)}]
+      :parent this
+      :params->pred #(pred schema %)}))
   (explain [this] (list 'named (explain schema) name)))
-#_(pred [this params] (pred schema params))
 
 (clojure.core/defn named
   "A value that must satisfy schema, and has a name for documentation purposes."
@@ -506,19 +506,20 @@
   Schema
   (spec [this]
     (variant/variant-spec
-     spec/+no-precondition+
-     (for [s schemas]
-       {:guard (complement (checker s)) ;; since the guard determines which option we check against
-        :schema s})
-     #(list 'some-matching-either-clause? %)))
+     {:pre spec/+no-precondition+
+      :options
+      (for [s schemas]
+        {:guard (complement (checker s)) ;; since the guard determines which option we check against
+         :schema s})
+      :err-f #(list 'some-matching-either-clause? %)
+      :parent this
+      :params->pred #(reduce
+                       (cc/fn [f s]
+                         (let [p? (spec/pred (spec s) %)]
+                           (cc/fn [x]
+                             (and (p? x) (f x)))))
+                       never? (rseq schemas))}))
   (explain [this] (cons 'either (map explain schemas))))
-#_(pred [this params]
-            (reduce
-              (fn [f s]
-                (let [p? (spec/pred s params)]
-                  (fn [x]
-                    (and (p? x) (f x)))))
-              never? (rseq schemas)))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
   "A value that must satisfy at least one schema in schemas.
@@ -540,29 +541,31 @@
   Schema
   (spec [this]
     (variant/variant-spec
-     spec/+no-precondition+
-     (for [[p s] preds-and-schemas]
-       {:guard p :schema s})
-     #(list (or error-symbol
-                (if (= 1 (count preds-and-schemas))
-                  (symbol (utils/fn-name (ffirst preds-and-schemas)))
-                  'some-matching-condition?))
-            %)))
+     {:pre spec/+no-precondition+
+      :options
+      (for [[p s] preds-and-schemas]
+        {:guard p :schema s})
+      :err-f
+      #(list (or error-symbol
+                 (if (= 1 (count preds-and-schemas))
+                   (symbol (utils/fn-name (ffirst preds-and-schemas)))
+                   'some-matching-condition?))
+             %)
+      :parent this
+      :params->pred #(reduce
+                       (cc/fn [f [guard s]]
+                         (let [pred (spec/pred (spec s) %)]
+                           (cc/fn [x]
+                             (if (guard x)
+                               (pred x)
+                               (f x)))))
+                       never? (rseq preds-and-schemas))}))
   (explain [this]
     (cons 'conditional
           (concat
            (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
                    preds-and-schemas)
            (when error-symbol [error-symbol])))))
-#_(pred [this params]
-          (reduce
-            (fn [f [guard s]]
-              (let [pred (spec/pred s params)]
-                (fn [x]
-                  (if (guard x)
-                    (pred x)
-                    (f x)))))
-            never? (rseq preds-and-schemas)))
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -600,31 +603,48 @@
 (extend-protocol HasPrecondition
   schema.spec.leaf.LeafSpec
   (precondition [this]
-    (complement (.-pre ^schema.spec.leaf.LeafSpec this)))
+    (spec/pre-pred this nil))
 
   schema.spec.variant.VariantSpec
   (precondition [^schema.spec.variant.VariantSpec this]
-    (every-pred
-     (complement (.-pre this))
-     (apply some-fn
-            (for [{:keys [guard schema]} (.-options this)]
-              (if guard
-                (every-pred guard (precondition (spec schema)))
-                (precondition (spec schema)))))))
+    (let [pre-pred (spec/pre-pred this nil)
+          f (reduce
+              (cc/fn [f {:keys [guard schema]}]
+                (let [p? (spec/pre-pred schema nil)
+                      g (if guard
+                          #(and (guard %) (p? %))
+                          p?)]
+                  #(or (g %) (f %))))
+              never? (rseq (.-options this)))]
+      #(and (pre-pred %)
+            (f %))))
 
   schema.spec.collection.CollectionSpec
   (precondition [this]
-    (complement (.-pre ^schema.spec.collection.CollectionSpec this))))
+    (spec/pre-pred this nil)))
 
 (macros/defrecord-schema CondPre [schemas]
   Schema
   (spec [this]
     (variant/variant-spec
-     spec/+no-precondition+
-     (for [s schemas]
-       {:guard (precondition (spec s))
-        :schema s})
-     #(list 'matches-some-precondition? %)))
+     {:pre spec/+no-precondition+
+      :options
+      (for [s schemas]
+        {:guard (precondition (spec s))
+         :schema s})
+      :err-f
+      #(list 'matches-some-precondition? %)
+      :parent this
+      :params->pred #(reduce (cc/fn [f s]
+                               (let [pred (spec/pred (spec s) %)]
+                                 (cc/fn [x]
+                                   (or (pred x) (f x)))))
+                             never? (rseq schemas))
+      :params->pre-pred #(reduce (cc/fn [f s]
+                                   (let [pre-pred (spec/pre-pred f %)]
+                                     (cc/fn [x]
+                                       (or (pre-pred x) (f x)))))
+                                 never? (rseq schemas))}))
   (explain [this]
     (cons 'cond-pre
           (map explain schemas))))
@@ -647,7 +667,7 @@
 
    EXPERIMENTAL"
   [& schemas]
-  (CondPre. schemas))
+  (CondPre. (vec schemas)))
 
 ;; constrained (post-condition on schema)
 
@@ -655,10 +675,13 @@
   Schema
   (spec [this]
     (variant/variant-spec
-     spec/+no-precondition+
-     [{:schema schema}]
-     nil
-     (spec/precondition this postcondition #(list post-name %))))
+     {:pre spec/+no-precondition+
+      :options [{:schema schema}]
+      :post (spec/precondition this postcondition #(list post-name %))
+      :params->pred (fn [params]
+                      (let [pred (spec/pred (spec schema) params)]
+                        #(and (pred %) (postcondition %))))
+      :params->pre-pred (fn [_] any?)}))
   (explain [this]
     (list 'constrained (explain schema) post-name)))
 
@@ -696,15 +719,17 @@
   spec/PredSpec
   (pred [this params]
     (reduce
-     (clojure.core/fn [f [s t]]
-       (if (nil? t)
-         (do (when-not (= "true" (System/getProperty "schema.core.no-perf-warn"))
-               (println (str "WARNING: No fast pred found for " (class s))))
-             (reduced nil))
-         (clojure.core/fn [x]
-           (and (t x) (f x)))))
-     (clojure.core/fn [_] true)
-     (map (juxt identity #(spec/sub-pred {:schema %} params)) (rseq schemas)))))
+     (cc/fn [f s]
+       (let [p? (spec/pred (spec s) params)]
+         #(and (p? %) (f %))))
+     any? (rseq schemas)))
+  spec/PrePredSpec
+  (pre-pred [this params]
+    (reduce
+     (cc/fn [f s]
+       (let [p? (spec/pre-pred (spec s) params)]
+         #(and (p? %) (f %))))
+     any? (rseq schemas))))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} both
   "A value that must satisfy every schema in schemas.
@@ -735,7 +760,11 @@
 
 (macros/defrecord-schema Recursive [derefable]
   Schema
-  (spec [this] (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}]))
+  (spec [this] (variant/variant-spec
+                 {:pre spec/+no-precondition+
+                  :options [{:schema @derefable}]
+                  :params->pred #(spec/pred (spec @derefable) %)
+                  :params->pre-pred #(spec/pre-pred (spec @derefable) %)}))
   (explain [this]
     (list 'recursive
           (if #?(:clj (var? derefable)
@@ -769,10 +798,16 @@
   Schema
   (spec [this]
     (-> (collection/collection-spec
-          (spec/simple-precondition this atom?)
-          clojure.core/atom
-          [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
-          (clojure.core/fn [_ xs _] (clojure.core/atom (first xs))))
+          {:pre (spec/simple-precondition this atom?)
+           :konstructor clojure.core/atom
+           :elements
+           [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
+           :on-error
+           (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))
+           :params->pred (fn [params]
+                           (let [p (spec/pred (spec schema) params)]
+                             #(and (atom? %) (p %))))
+           :params->pre-pred (fn [_] atom?)})
         (assoc :base-pred atom?)))
   (explain [this] (list 'atom (explain schema))))
 

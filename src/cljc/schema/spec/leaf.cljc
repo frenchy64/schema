@@ -12,9 +12,13 @@
   (checker [this params]
     (fn [x] (or (pre x) x)))
   spec/PredSpec
-  (pred [this params] (or (:pred this)
-                          (println "WARNING: no pred")
-                          #_(comp nil? pre))))
+  (pred [{:keys [pred]} params]
+    (assert pred)
+    pred)
+  spec/PrePredSpec
+  (pre-pred [{:keys [pred]} params]
+    (assert pred)
+    pred))
 
 (defn leaf-spec
   "A leaf spec represents an atomic datum that is checked completely

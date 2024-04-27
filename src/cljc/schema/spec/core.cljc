@@ -31,6 +31,9 @@
 (defprotocol PredSpec
   (pred [this params]))
 
+(defprotocol PrePredSpec
+  (pre-pred [this params]))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Preconditions
 
@@ -115,5 +118,4 @@
    Handles caching and error wrapping behavior."
   [{:keys [schema]}
    {:keys [subschema-pred] :as params}]
-  (prn "sub-pred")
   (subschema-pred schema params))

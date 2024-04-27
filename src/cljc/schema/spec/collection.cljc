@@ -99,17 +99,23 @@
    Note that the `optional` carries no semantics with respect to validation;
    the user must ensure that the parser enforces the desired semantics, which
    should match the structure of the spec for proper generation."
-  [pre ;- spec/Precondition
-   konstructor ;- (s/=> s/Any [(s/named s/Any 'checked-value)])
-   elements ;- [(s/cond-pre
-   ;;            {:schema (s/protocol Schema)
-   ;;             :parser (s/=> s/Any (s/=> s/Any s/Any) s/Any) ; takes [item-fn coll], calls item-fn on matching items, returns remaining.
-   ;;             (s/optional-key :error-wrap) (s/pred fn?)}
-   ;;            [(s/one ::optional) (s/recursive Elements)]]
-   ;;          where the last element can optionally be a [::remaining schema]
-   on-error ;- (=> s/Any (s/named s/Any 'value) [(s/named s/Any 'checked-element)] [(s/named s/Any 'unmatched-element)])
-   ]
-  (->CollectionSpec pre konstructor elements on-error))
+  ([{:keys [pre konstructor elements on-error
+            params->pred params->pre-pred parent]}]
+   (cond-> (->CollectionSpec pre konstructor elements on-error)
+     params->pred (assoc :params->pred params->pred)
+     params->pre-pred (assoc :params->pre-pred params->pre-pred)
+     parent (assoc :parent parent)))
+  ([pre ;- spec/Precondition
+    konstructor ;- (s/=> s/Any [(s/named s/Any 'checked-value)])
+    elements ;- [(s/cond-pre
+    ;;            {:schema (s/protocol Schema)
+    ;;             :parser (s/=> s/Any (s/=> s/Any s/Any) s/Any) ; takes [item-fn coll], calls item-fn on matching items, returns remaining.
+    ;;             (s/optional-key :error-wrap) (s/pred fn?)}
+    ;;            [(s/one ::optional) (s/recursive Elements)]]
+    ;;          where the last element can optionally be a [::remaining schema]
+    on-error ;- (=> s/Any (s/named s/Any 'value) [(s/named s/Any 'checked-element)] [(s/named s/Any 'unmatched-element)])
+    ]
+   (->CollectionSpec pre konstructor elements on-error)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
