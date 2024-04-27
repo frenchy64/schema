@@ -79,9 +79,8 @@
 (defn run-pred
   "A helper to start a pred run, by setting the appropriate params.
    For examples, see schema.core/checker or schema.coerce/coercer."
-  [f s]
-  (prn "run-pred" f s)
-  (f s {:subschema-pred f}))
+  [f s params]
+  (f s (assoc params :subschema-pred f)))
 
 (defn with-cache [cache cache-key wrap-recursive-delay result-fn]
   (if-let [w #?(:clj (.get ^java.util.Map cache cache-key)

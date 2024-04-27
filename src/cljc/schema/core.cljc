@@ -105,6 +105,16 @@
      user> (s/explain {:a s/Keyword :b [s/Int]} )
      {:a Keyword, :b [Int]}"))
 
+(clojure.core/defprotocol SchemaSyntax
+  (original-syntax [this] "Returns the original syntax for a schema. Returns this if none."))
+
+(extend-protocol SchemaSyntax
+  nil
+  (original-syntax [_] nil)
+  #?(:clj Object :cljs default)
+  (original-syntax [this] this))
+
+
 #?(:clj
 (clojure.core/defn register-schema-print-as-explain [t]
   (clojure.core/defmethod print-method t [s writer]
@@ -120,9 +130,13 @@
               (prefer-method m schema.core.Schema java.util.Map)
               (prefer-method m schema.core.Schema clojure.lang.IPersistentMap))))
 
+(def ^:private pred-params
+  {::spec #(spec %)})
+
 (clojure.core/defn- predicate [schema]
   (spec/run-pred (clojure.core/fn [s params] (spec/pred (spec s) params))
-                 schema))
+                 schema
+                 pred-params))
 
 (clojure.core/defn checker
   "Compile an efficient checker for schema, which returns nil for valid values and
@@ -131,7 +145,7 @@
   (let [explainer (comp utils/error-val
                         (spec/run-checker
                           (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))
-        pred (spec/pred (spec schema) nil)]
+        pred (predicate schema)]
     (assert pred schema)
     #(if (try (pred %) (catch Throwable _))
        nil
@@ -186,14 +200,17 @@
   ([s klass pred] (spec/precondition s pred #(list 'instance? klass %))))
 
 (defn- -class-spec [this]
-  (let [pred (instance-pred this)
-        pre (instance-precondition this this pred)]
-    (if-let [class-schema (utils/class-schema this)]
-      (variant/variant-spec
-        {:pre pre :options [{:schema class-schema}]
-         :parent this :params->pred (cc/fn [_] pred)
-         :params->pre-pred (cc/fn [_] pred)})
-      (leaf/leaf-spec pre pred))))
+  (or (utils/get-spec this)
+      (utils/declare-spec!
+        this
+        (let [pred (instance-pred this)
+              pre (instance-precondition this this pred)]
+          (if-let [class-schema (utils/class-schema this)]
+            (variant/variant-spec
+              {:pre pre :options [{:schema class-schema}]
+               :parent this :params->pred (cc/fn [_] pred)
+               :params->pre-pred (cc/fn [_] pred)})
+            (leaf/leaf-spec pre pred))))))
 
 (defn- -class-explain [this]
   (if-let [more-schema (utils/class-schema this)]
@@ -210,14 +227,25 @@
                   (symbol (.getName ^Class this)))
          :cljs this))))
 
+(defn- -class-schema [this]
+  (or (utils/get-syntax-schema this)
+      (utils/declare-syntax-schema!
+        this
+        (let [sp (delay (-class-spec this))
+              expl (delay (-class-explain this))]
+          (reify
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl))))))
+
 (extend-protocol Schema
   #?(:clj Class
      :cljs function)
-  (spec [this] (-class-spec this))
-  (explain [this] (-class-explain this))
+  (spec [this] (-> this -class-schema spec))
+  (explain [this] (-> this -class-schema explain))
   #?@(:bb [sci.lang.Type
-           (spec [this] (-class-spec this))
-           (explain [this] (-class-explain this))]))
+           (spec [this] (-> this -class-schema spec))
+           (explain [this] (-> this -class-schema explain))]))
 
 ;; On the JVM, the primitive coercion functions (double, long, etc)
 ;; alias to the corresponding boxed number classes
@@ -226,16 +254,16 @@
 (do
   (defmacro extend-primitive [cast-sym class-sym]
     (let [qualified-cast-sym `(class @(resolve '~cast-sym))]
-      `(extend-protocol Schema
-         ~qualified-cast-sym
-         (spec [this#]
-           (variant/variant-spec
-             {:pre spec/+no-precondition+
-              :options [{:schema ~class-sym}]
-              :params->pred (cc/fn [_#] #(instance? ~class-sym %))
-              :params->pre-pred (cc/fn [_#] any?)}))
-         (explain [this#]
-           '~cast-sym))))
+      `(let [spec# (delay (variant/variant-spec
+                            {:pre spec/+no-precondition+
+                             :options [{:schema ~class-sym}]
+                             :params->pred (cc/fn [_#] #(instance? ~class-sym %))
+                             :params->pre-pred (cc/fn [_#] any?)}))
+             sym# '~cast-sym]
+         (extend-protocol Schema
+           ~qualified-cast-sym
+           (spec [_#] @spec#)
+           (explain [_#] sym#)))))
 
   (extend-primitive double Double)
   (extend-primitive float Float)
@@ -382,6 +410,21 @@
 
 ;;; regex (validates matching Strings)
 
+(defn- -re-schema [this]
+  (or (utils/get-syntax-schema this)
+      (utils/declare-syntax-schema!
+        (let [sp (delay (leaf/leaf-spec
+                          (some-fn
+                            (spec/simple-precondition this string?)
+                            (spec/precondition this #(re-find this %) #(list 're-find (explain this) %)))))
+              expl (delay
+                     #?(:clj (symbol (str "#\"" this "\""))
+                        :cljs (symbol (str "#\"" (.slice (str this) 1 -1) "\""))))]
+          (reify
+            Schema
+            (spec [_] @sp)
+            (explain [_] @this))))))
+
 (extend-protocol Schema
   #?(:clj java.util.regex.Pattern
      :cljs js/RegExp)
@@ -490,7 +533,7 @@
      {:pre spec/+no-precondition+
       :options [{:schema schema :wrap-error #(utils/->NamedError name %)}]
       :parent this
-      :params->pred #(pred schema %)}))
+      :params->pred #(spec/pred (spec schema) %)}))
   (explain [this] (list 'named (explain schema) name)))
 
 (clojure.core/defn named
@@ -976,10 +1019,10 @@
 
 (defn- map-spec [this]
   (collection/collection-spec
-   (spec/simple-precondition this map?)
-   #(into {} %)
-   (map-elements this)
-   (map-error)))
+    (spec/simple-precondition this map?)
+    #(into {} %)
+    (map-elements this)
+    (map-error)))
 
 (clojure.core/defn- map-explain [this]
   (reduce-kv (fn [m k v]
@@ -1005,16 +1048,16 @@
   #?(:clj clojure.lang.APersistentSet
      :cljs cljs.core.PersistentHashSet)
   (spec [this]
-    (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
-    (collection/collection-spec
-     {:pre (spec/simple-precondition this set?)
-      :konstructor set
-      :options [(collection/all-elements (first this))]
-      :on-error (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))
-      :params->pred (cc/fn [params]
-                      (let [p (spec/pred (spec (first this)) params)]
-                        #(and (set? %) (p %))))
-      :params->pre-pred (cc/fn [_] set?)}))
+    (do (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
+        (collection/collection-spec
+          {:pre (spec/simple-precondition this set?)
+           :konstructor set
+           :options [(collection/all-elements (first this))]
+           :on-error (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))
+           :params->pred (cc/fn [params]
+                           (let [p (spec/pred (spec (first this)) params)]
+                             #(and (set? %) (p %))))
+           :params->pre-pred (cc/fn [_] set?)})))
   (explain [this] #{(explain (first this))}))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1107,48 +1150,48 @@
      :cljs cljs.core.PersistentVector)
   (spec [this]
     (collection/collection-spec
-     {:pre
-      (spec/precondition
-        this
-        sequential-schema-pre-pred
-        #(list 'sequential? %))
-      :konstructor
-      vec
-      :options
-      (let [[singles multi] (parse-sequence-schema this)]
-        (reduce
-          (clojure.core/fn [more ^One s]
-            (if-not (.-optional? s)
-              (cons
-                (collection/one-element
-                  true (named (.-schema s) (.-name s))
+      {:pre
+       (spec/precondition
+         this
+         sequential-schema-pre-pred
+         #(list 'sequential? %))
+       :konstructor
+       vec
+       :options
+       (let [[singles multi] (parse-sequence-schema this)]
+         (reduce
+           (clojure.core/fn [more ^One s]
+             (if-not (.-optional? s)
+               (cons
+                 (collection/one-element
+                   true (named (.-schema s) (.-name s))
+                   (clojure.core/fn [item-fn x]
+                     (if-let [x (seq x)]
+                       (do (item-fn (first x))
+                           (rest x))
+                       (do (item-fn
+                             (macros/validation-error
+                               (.-schema s) ::missing
+                               (list 'present? (.-name s))))
+                           nil))))
+                 more)
+               [(collection/optional-tail
+                  (named (.-schema s) (.-name s))
                   (clojure.core/fn [item-fn x]
-                    (if-let [x (seq x)]
-                      (do (item-fn (first x))
-                          (rest x))
-                      (do (item-fn
-                            (macros/validation-error
-                              (.-schema s) ::missing
-                              (list 'present? (.-name s))))
-                          nil))))
-                more)
-              [(collection/optional-tail
-                 (named (.-schema s) (.-name s))
-                 (clojure.core/fn [item-fn x]
-                   (when-let [x (seq x)]
-                     (item-fn (first x))
-                     (rest x)))
-                 more)]))
-          (when multi
-            [(collection/all-elements multi)])
-          (reverse singles)))
-      :on-error
-      (clojure.core/fn [_ elts extra]
-        (let [head (mapv utils/error-val elts)]
-          (cond-> head
-            (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))
-      :params->pred (cc/fn [_] (assert nil 'TODO))
-      :params->pre-pred (cc/fn [_] sequential-schema-pre-pred)}))
+                    (when-let [x (seq x)]
+                      (item-fn (first x))
+                      (rest x)))
+                  more)]))
+           (when multi
+             [(collection/all-elements multi)])
+           (reverse singles)))
+       :on-error
+       (clojure.core/fn [_ elts extra]
+         (let [head (mapv utils/error-val elts)]
+           (cond-> head
+             (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))
+       :params->pred (cc/fn [_] (assert nil 'TODO))
+       :params->pre-pred (cc/fn [_] sequential-schema-pre-pred)}))
   (explain [this]
     (let [[singles multi] (parse-sequence-schema this)]
       (cond-> (mapv (clojure.core/fn [^One s]
@@ -1308,18 +1351,40 @@
   [schema]
   (-> schema meta :ns))
 
+(defn ^:internal -defschema [{s :schema :keys [name nsym]}]
+  (let [name-schema #(vary-meta
+                       (schema-with-name % name)
+                       assoc :ns nsym)]
+    (name-schema
+      (if #?(:clj (instance? clojure.lang.IObj s)
+             :cljs (satisfies? IWithMeta schema))
+        (name-schema s)
+        (or (utils/get-syntax-schema s)
+            (utils/declare-syntax-schema!
+              s
+              (let [sp (delay (spec s))
+                    expl (delay (explain s))]
+                (reify
+                  SchemaSyntax
+                  (original-syntax [_] s)
+                  Schema
+                  (spec [_] @sp)
+                  (explain [_] @expl)))))))))
+
 #?(:clj
 (defmacro defschema
-  "Convenience macro to make it clear to reader that body is meant to be used as a schema.
-   The name of the schema is recorded in the metadata."
+  "Convenience macro to make it clear to the reader that body is meant to be used as a schema
+   that also precomputes parts of the Schema for performance.
+
+   The name of the schema is recorded in the metadata. If metadata is not supported on
+   the schema, will be wrapped in a Schema in order to attach the metadata. The wrapper
+   implements SchemaSyntax to recover the wrapped value."
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
-   `(do ~@(macros/register-class-preds &env form)
-        (def ~name ~docstring
-          (vary-meta
-            (schema-with-name ~form '~name)
-            assoc :ns '~(ns-name *ns*)))))))
+   `(def ~name ~docstring
+      (-defschema
+        {:schema ~form :name '~name :nsym '~(ns-name *ns*)})))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1476,15 +1541,12 @@
                   (cons (gensym "fn") fn-args))
         [name more-fn-args] (macros/extract-arrow-schematized-element &env fn-args)
         {:keys [outer-bindings schema-form fn-body]} (macros/process-fn- &env name more-fn-args)]
-    `(do ~@(when-not (and (not (macros/cljs-env? &env)) macros/bb?)
-             (when (empty? &env) ;; likely a top-level form
-               (macros/register-class-preds &env schema-form)))
-         (let [~@outer-bindings
-               ;; let bind to work around https://clojure.atlassian.net/browse/CLJS-968
-               f# ~(vary-meta `(clojure.core/fn ~name ~@fn-body)
-                              #(assoc (merge (meta &form) %)
-                                      :schema schema-form))]
-           f#)))))
+    `(let [~@outer-bindings
+           ;; let bind to work around https://clojure.atlassian.net/browse/CLJS-968
+           f# ~(vary-meta `(clojure.core/fn ~name ~@fn-body)
+                          #(assoc (merge (meta &form) %)
+                                  :schema schema-form))]
+       f#))))
 
 #?(:clj
 (defmacro defn
@@ -1546,23 +1608,22 @@
   (let [[name & more-defn-args] (macros/normalized-defn-args &env defn-args)
         {:keys [doc tag] :as standard-meta} (meta name)
         {:keys [outer-bindings schema-form fn-body arglists raw-arglists]} (macros/process-fn- &env name more-defn-args)]
-    `(do ~@(macros/register-class-preds &env schema-form)
-         (let ~outer-bindings
-           (let [ret# (clojure.core/defn ~(with-meta name {})
-                        ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
-                                :doc (str
-                                       (str "Inputs: " (if (= 1 (count raw-arglists))
-                                                         (first raw-arglists)
-                                                         (apply list raw-arglists)))
-                                       (when-let [ret (when (= (second defn-args) :-) (nth defn-args 2))]
-                                         (str "\n  Returns: " ret))
-                                       (when doc (str  "\n\n  " doc)))
-                                :raw-arglists (list 'quote raw-arglists)
-                                :arglists (list 'quote arglists)
-                                :schema schema-form)
-                        ~@fn-body)]
-             (utils/declare-class-schema! (utils/fn-schema-bearer ~name) ~schema-form)
-             ret#))))))
+    `(let ~outer-bindings
+       (let [ret# (clojure.core/defn ~(with-meta name {})
+                    ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
+                            :doc (str
+                                   (str "Inputs: " (if (= 1 (count raw-arglists))
+                                                     (first raw-arglists)
+                                                     (apply list raw-arglists)))
+                                   (when-let [ret (when (= (second defn-args) :-) (nth defn-args 2))]
+                                     (str "\n  Returns: " ret))
+                                   (when doc (str  "\n\n  " doc)))
+                            :raw-arglists (list 'quote raw-arglists)
+                            :arglists (list 'quote arglists)
+                            :schema schema-form)
+                    ~@fn-body)]
+         (utils/declare-class-schema! (utils/fn-schema-bearer ~name) ~schema-form)
+         ret#)))))
 
 #?(:clj
 (defmacro defmethod
@@ -1663,8 +1724,7 @@
                             ~@opts
                             ~@sigs)
         instrument? (instrument-defprotocol?)]
-    `(do ~@(macros/register-class-preds &env (map :schema-form parsed-sigs))
-         ~defprotocol-form
+    `(do ~defprotocol-form
          ;; put everything that relies on protocol implementation details here so the user can
          ;; turn it off for whatever reason.
          ~@(when instrument?
@@ -1744,11 +1804,10 @@
         init (first more-def-args)
         schema-form (macros/extract-schema-form name)]
     (macros/assert! (= 1 (count more-def-args)) "Illegal args passed to schema def: %s" def-args)
-    `(do ~@(macros/register-class-preds &env schema-form)
-         (let [output-schema# ~schema-form]
-           (def ~name
-             ~@(when doc-string? [doc-string?])
-             (validate output-schema# ~init)))))))
+    `(let [output-schema# ~schema-form]
+       (def ~name
+         ~@(when doc-string? [doc-string?])
+         (validate output-schema# ~init))))))
 
 #?(:clj
 (set! *warn-on-reflection* false))

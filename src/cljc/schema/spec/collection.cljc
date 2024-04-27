@@ -71,6 +71,34 @@
         (assert (allowed-subschema-types (nth elt 0)))
         (mapcat subschemas (subvec elt 1)))))
 
+(declare sequence-pred)
+
+(defn- element-pred [e params then remaining-schema-allowed?]
+  (if (vector? e)
+    (case (nth e 0)
+      ::optional
+      (sequence-pred (subvec e 1) params then)
+
+      ::remaining
+      (let [_ (macros/assert! remaining-schema-allowed? "Remaining schemas must be in tail position.")
+            _ (macros/assert! (= 2 (count e)) "remaining can have only one schema.")
+            p? (spec/sub-pred (nth e 1) params)]
+        #(every? p? %)))
+
+    (let [parser (spec (:schema e))
+          c (spec/sub-pred e params)]
+      (fn [res x]
+        (then res (parser (fn [t] (swap! res conj (if (utils/error? t) t (c t)))) x))))))
+
+(defn- sequence-pred [elts params then]
+  (if (zero? (count elts))
+    #(empty? %)
+    (reduce
+      (fn [f e]
+        (element-pred e params f false))
+      (element-pred (peek elts) params then true)
+      (-> elts pop rseq))))
+
 (defrecord CollectionSpec [pre konstructor elements on-error]
   
   spec/CoreSpec
@@ -88,15 +116,17 @@
                 (konstructor res)))))))
   spec/PredSpec
   (pred [{:keys [pre-pred]} params]
-    (let [t (sequence-transformer elements params (fn [_ x] x))]
+    (let [pre-pred (or pre-pred
+                       (println "WARNING: Performance issue with CollectionSpec")
+                       (complement pre))
+          t (sequence-pred elements params (fn [_ x] x))]
       (fn [x]
-        (or (pre x)
-            (let [res #?(:clj (java.util.ArrayList.) :cljs (atom []))
-                  remaining (t res x)
-                  res #?(:clj res :cljs @res)]
-              (if (or (seq remaining) (has-error? res))
-                (utils/error (on-error x res remaining))
-                true)))))))
+        (and (pre-pred x)
+             (let [res (atom [])
+                   remaining (t res x)
+                   res @res]
+               (not (or (seq remaining)
+                        (has-error? res)))))))))
 
 (defn collection-spec
   "A collection represents a collection of elements, each of which is itself
