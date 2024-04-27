@@ -259,6 +259,7 @@
 ;;; Any matches anything (including nil)
 
 (defn- any? [_] true)
+(defn- never? [_] false)
 
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
@@ -516,21 +517,25 @@
           spec/CoreSpec
           (subschemas [_] schemas)
           (checker [this params]
-            (let [chks (mapv (fn [s]
-                               [(spec/pred s params) (spec/checker s params)])
-                             schemas)
-                  none-matched (gensym)]
-              (fn [x]
-                (let [r (reduce
-                          (fn [none-matched [p? chk]]
-                            ;; not exactly the "guard", I think this should be the precondition, not the pred - Ambrose
-                            (if (p? x) ;; since the guard determines which option we check against
-                              (reduced (chk x))
-                              none-matched))
-                          none-matched chks)]
-                  (if (identical? none-matched r)
-                    (list 'some-matching-either-clause? (utils/value-name x))
-                    r)))))))
+            (reduce
+              (fn [f s]
+                ;; not exactly the "guard", I think this should be the precondition, not the pred - Ambrose
+                (let [p? (spec/pred s params) ;; since the guard determines which option we check against
+                      chk (spec/checker s params)]
+                  (fn [x]
+                    (if (p? x)
+                      (chk x)
+                      (f x)))))
+              (fn [x] (macros/validation-error this x (list 'some-matching-either-clause? (utils/value-name x))))
+              (rseq schemas)))
+          spec/PredSpec
+          (pred [this params]
+            (reduce
+              (fn [f s]
+                (let [p? (spec/pred s params)]
+                  (fn [x]
+                    (and (p? x) (f x)))))
+              never? (rseq schemas)))))
   (explain [this] (cons 'either (map explain schemas))))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
@@ -552,41 +557,36 @@
 (macros/defrecord-schema ConditionalSchema [preds-and-schemas error-symbol]
   Schema
   (spec [this]
-    (let [preds (mapv first preds-and-schemas)
-          schemas (mapv second preds-and-schemas)
-          none-matched (gensym)]
+    (let [schemas (delay (mapv second preds-and-schemas))
+          error-symbol (delay
+                         (or error-symbol
+                             (if (= 1 (count preds-and-schemas))
+                               (symbol (utils/fn-name (ffirst preds-and-schemas)))
+                               'some-matching-condition?)))]
       (reify
         spec/CoreSpec
-        (subschemas [this] schemas)
+        (subschemas [this] @schemas)
         (checker [this params]
-          (let [t (reduce
-                    (fn [f o]
-                      (option-step o params f))
-                    (fn [x] (macros/validation-error this x (err-f (utils/value-name x))))
-                    (rseq options))]
-            #_ ;;TODO this is just a copy-paste of Either, actually implement it
-            (fn [x]
-              (let [r (reduce
-                        (fn [none-matched [p? chk]]
-                          ;; not exactly the "guard" - Ambrose
-                          (if (p? x) ;; since the guard determines which option we check against
-                            (reduced (chk x))
-                            none-matched))
-                        none-matched chks)]
-                (if (identical? none-matched r)
-                  (list 'some-matching-either-clause? (utils/value-name x))
-                  r)))))
-        ))
-    #_
-    (variant/variant-spec
-     spec/+no-precondition+
-     (for [[p s] preds-and-schemas]
-       {:guard p :schema s})
-     #(list (or error-symbol
-                (if (= 1 (count preds-and-schemas))
-                  (symbol (utils/fn-name (ffirst preds-and-schemas)))
-                  'some-matching-condition?))
-            %)))
+          (reduce
+            (fn [f [guard s]]
+              (let [chk (spec/checker s params)]
+                (fn [x]
+                  (if (guard x)
+                    (chk x)
+                    (f x)))))
+            (fn [x] (macros/validation-error this x (list @error-symbol (utils/value-name x))))
+            (rseq preds-and-schemas)))
+
+        spec/PredSpec
+        (pred [this params]
+          (reduce
+            (fn [f [guard s]]
+              (let [pred (spec/pred s params)]
+                (fn [x]
+                  (if (guard x)
+                    (pred x)
+                    (f x)))))
+            never? (rseq preds-and-schemas))))))
   (explain [this]
     (cons 'conditional
           (concat
