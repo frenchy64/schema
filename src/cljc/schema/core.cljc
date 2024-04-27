@@ -145,9 +145,10 @@
   (let [explainer (comp utils/error-val
                         (spec/run-checker
                           (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))
-        pred (predicate schema)]
-    (assert pred schema)
-    #(if (try (pred %) (catch Throwable _))
+        ;pred (predicate schema)
+        ]
+    #_(assert pred schema)
+    #(if nil #_(try (pred %) (catch Throwable _))
        nil
        (explainer %))))
 

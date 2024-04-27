@@ -73,7 +73,7 @@
 
 (declare sequence-pred)
 
-(defn- element-pred [e params then remaining-schema-allowed?]
+(defn- element-pred [e {spec :schema.core/spec :as params} then remaining-schema-allowed?]
   (if (vector? e)
     (case (nth e 0)
       ::optional
