@@ -15,20 +15,20 @@
 
 (defn- element-transformer [e params then remaining-schema-allowed?]
   (if (vector? e)
-    (case (first e)
+    (case (nth e 0)
       ::optional
       (sequence-transformer (subvec e 1) params then)
 
       ::remaining
       (let [_ (macros/assert! remaining-schema-allowed? "Remaining schemas must be in tail position.")
             _ (macros/assert! (= 2 (count e)) "remaining can have only one schema.")
-            c (spec/sub-checker (second e) params)]
+            c (spec/sub-checker (nth e 1) params)]
         #?(:clj (fn [^java.util.List res x]
                   (doseq [i x]
                     (.add res (c i)))
                   (then res nil))
            :cljs (fn [res x]
-                   (swap! res into (map c x))
+                   (swap! res into (map c) x)
                    (then res nil)))))
 
     (let [parser (:parser e)
@@ -41,12 +41,11 @@
 (defn- sequence-transformer [elts params then]
   (if (zero? (count elts))
     then
-    (let [start (element-transformer (peek elts) params then true)]
-      (reduce
-        (fn [f e]
-          (element-transformer e params f false))
-        start
-        (-> elts pop rseq)))))
+    (reduce
+      (fn [f e]
+        (element-transformer e params f false))
+      (element-transformer (peek elts) params then true)
+      (-> elts pop rseq))))
 
 #?(:clj ;; for performance
 (defn- has-error? [^java.util.List l]
@@ -62,12 +61,15 @@
 (defn- has-error? [l]
   (some utils/error? l)))
 
+(def ^:private allowed-subschema-types #{::remaining ::optional})
+
 (defn subschemas [elt]
   (if (map? elt)
     [(:schema elt)]
     (do (assert (vector? elt))
-        (assert (#{::remaining ::optional} (first elt)))
-        (mapcat subschemas (next elt)))))
+        (assert (pos? (count elt)))
+        (assert (allowed-subschema-types (nth elt 0)))
+        (mapcat subschemas (subvec elt 1)))))
 
 (defrecord CollectionSpec [pre konstructor elements on-error]
   
@@ -141,7 +143,7 @@
 (defn optional
   "If any more elements are present, they must match the elements in 'ss'"
   [& ss]
-  (vec (cons ::optional ss)))
+  (into [::optional] ss))
 
 (defn all-elements [schema]
   (remaining
