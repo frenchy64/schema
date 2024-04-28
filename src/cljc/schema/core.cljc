@@ -80,6 +80,7 @@
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
    #?(:clj [schema.macros :as macros])
+   #?(:cljs [goog.object :as gobject])
    [schema.protocols :as prot]
    [schema.utils :as utils]
    [schema.spec.core :as spec :include-macros true]
@@ -88,7 +89,7 @@
    [schema.spec.collection :as collection]
    [clojure.core :as cc])
   #?(:cljs (:require-macros [schema.macros :as macros]
-                            [schema.core :refer [defrecord-cached-schema]])))
+                            [schema.core :refer [defrecord-cached-schema soft-delay]])))
 
 #?(:clj (set! *warn-on-reflection* true))
 
@@ -215,12 +216,31 @@
                   (symbol (.getName ^Class this)))
          :cljs this))))
 
+(clojure.core/defn soft-delay* [f]
+  #?(:clj (let [v (volatile! nil)]
+            (reify
+              clojure.lang.IDeref
+              (deref [_]
+                (or (when-some [^java.lang.ref.SoftReference r @v]
+                      (.get r))
+                    (let [res (f)]
+                      (vreset! v (java.lang.ref.SoftReference. res))
+                      res)))))
+     :cljs (reify
+             cljs.core.IDeref
+             ;;TODO WeakRef? https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakRef
+             (-deref [_] (f)))))
+
+#?(:clj
+   (defmacro soft-delay [& body]
+     `(soft-delay* #(do ~@body))))
+
 (defn- -class-schema [this]
   (or (utils/get-syntax-schema this)
       (utils/declare-syntax-schema!
         this
-        (let [sp (delay (-class-spec this))
-              expl (delay (-class-explain this))]
+        (let [sp (soft-delay (-class-spec this))
+              expl (soft-delay (-class-explain this))]
           (reify
             prot/SchemaSyntax
             (original-syntax [_] this)
@@ -244,7 +264,7 @@
 (do
   (defmacro extend-primitive [cast-sym class-sym]
     (let [qualified-cast-sym `(class @(resolve '~cast-sym))]
-      `(let [spec# (delay (variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}]))]
+      `(let [spec# (soft-delay (variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}]))]
          (extend-protocol Schema
            ~qualified-cast-sym
            (spec [_#] @spec#)
@@ -281,9 +301,9 @@
                               :spec +cached-record-specs+
                               :explain +cached-record-explains+))]
         :cljs [->id (cc/fn [cls-name field]
-                      (str "schema$core$" cls-nme "$" (name field)))])
+                      (str "schema$core$" cls-name "$" (name field)))])
   (defn- -set-cached-record-field-fn [this cls-name field this->v]
-    (let [f (let [d (delay (this->v this))]
+    (let [f (let [d (soft-delay (this->v this))]
               (cc/fn [this']
                 (when (identical? this this')
                   (assert d)
@@ -295,16 +315,16 @@
           _ #?(:clj (let [^java.util.Map weak (field->Map field)]
                       (.put weak this f)
                       f)
-               :cljs (gobject/set this (->id cls-nme field) f))]
+               :cljs (gobject/set this (->id cls-name field) f))]
       f))
 
-  (defn- -get-cached-record-field [this cls-nme field this->v]
+  (defn- -get-cached-record-field [this cls-name field this->v]
     (or (when-some [f #?(:clj (let [^java.util.Map weak (field->Map field)]
                                 (.get weak this))
-                         :cljs (gobject/get this (->id cls-nme field)))]
+                         :cljs (gobject/get this (->id cls-name field)))]
           (f this))
         ((-set-cached-record-field-fn
-           this cls-nme field this->v)
+           this cls-name field this->v)
          this))))
 
 #?(:clj
@@ -331,7 +351,7 @@
 
 ;;; Any matches anything (including nil)
 
-(def ^:private -Anything-spec (delay (leaf/leaf-spec spec/+no-precondition+)))
+(def ^:private -Anything-spec (soft-delay (leaf/leaf-spec spec/+no-precondition+)))
 
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
@@ -503,11 +523,11 @@
   (or (utils/get-syntax-schema this)
       (utils/declare-syntax-schema!
         this
-        (let [sp (delay (leaf/leaf-spec
-                          (some-fn
-                            (spec/simple-precondition this string?)
-                            (spec/precondition this #(re-find this %) #(list 're-find (explain this) %)))))
-              expl (delay
+        (let [sp (soft-delay (leaf/leaf-spec
+                               (some-fn
+                                 (spec/simple-precondition this string?)
+                                 (spec/precondition this #(re-find this %) #(list 're-find (explain this) %)))))
+              expl (soft-delay
                      #?(:clj (symbol (str "#\"" this "\""))
                         :cljs (symbol (str "#\"" (.slice (str this) 1 -1) "\""))))]
           (reify
@@ -590,7 +610,7 @@
   -Maybe-spec
   -Maybe-explain)
 
-(let [nil-option (delay {:guard nil? :schema (eq nil)})]
+(let [nil-option (soft-delay {:guard nil? :schema (eq nil)})]
   (defn- -Maybe-spec [^Maybe this]
     (let [schema (.-schema this)]
       (variant/variant-spec
@@ -1114,8 +1134,8 @@
   (or (utils/get-syntax-schema this)
       (utils/declare-syntax-schema!
         this
-        (let [sp (delay (map-spec this))
-              expl (delay (map-explain this))]
+        (let [sp (soft-delay (map-spec this))
+              expl (soft-delay (map-explain this))]
           (reify
             prot/SchemaSyntax
             (original-syntax [_] this)
@@ -1143,13 +1163,13 @@
       (do (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
           (utils/declare-syntax-schema!
             this
-            (let [sp (delay
+            (let [sp (soft-delay
                        (collection/collection-spec
                          (spec/simple-precondition this set?)
                          set
                          [(collection/all-elements (first this))]
                          (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))))
-                  expl (delay #{(explain (first this))})]
+                  expl (soft-delay #{(explain (first this))})]
               (reify
                 prot/SchemaSyntax
                 (original-syntax [_] this)
@@ -1302,8 +1322,8 @@
   (or (utils/get-syntax-schema this)
       (utils/declare-syntax-schema!
         this
-        (let [sp (delay (-sequence-spec this))
-              expl (delay (-sequence-explain this))]
+        (let [sp (soft-delay (-sequence-spec this))
+              expl (soft-delay (-sequence-explain this))]
           (reify
             prot/SchemaSyntax
             (original-syntax [_] this)
@@ -1474,13 +1494,12 @@
   (-> schema meta :ns))
 
 (cc/defn ^:internal -defschema [{s :schema :keys [name nsym]}]
-  (prn "-defschema")
   (let [name-schema #(vary-meta
                        (schema-with-name % name)
                        assoc :ns nsym)]
     (name-schema
       (if #?(:clj (instance? clojure.lang.IObj s)
-             :cljs (satisfies? IWithMeta schema))
+             :cljs (satisfies? IWithMeta s))
         s
         (or (utils/get-syntax-schema s)
             (utils/declare-syntax-schema!
