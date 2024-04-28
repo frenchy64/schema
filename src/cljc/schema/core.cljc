@@ -901,20 +901,28 @@
   #?(:clj (instance? clojure.lang.Atom x)
      :cljs (satisfies? IAtom x)))
 
-(macros/defrecord-schema Atomic [schema]
-  Schema
-  (spec [this]
+(defn- -Atomic-spec [^Atomic this]
+  (let [schema (.-schema this)]
     (collection/collection-spec
-     (spec/simple-precondition this atom?)
-     clojure.core/atom
-     [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
-     (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))))
-  (explain [this] (list 'atom (explain schema))))
+      (spec/simple-precondition this atom?)
+      clojure.core/atom
+      [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
+      (clojure.core/fn [_ xs _] (clojure.core/atom (first xs))))))
+
+(defn- -Atomic-explain [^Atomic this]
+  (let [schema (.-schema this)]
+    (list 'atom (explain schema))))
+
+(defrecord-cached-schema Atomic [schema]
+  -Atomic-spec
+  -Atomic-explain)
 
 (clojure.core/defn atom
   "An atom containing a value matching 'schema'."
   [schema]
-  (->Atomic schema))
+  (-> (->Atomic schema)
+      (-construct-cached-schema-record
+        'Atomic -Atomic-spec -Atomic-explain)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
