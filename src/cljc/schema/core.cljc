@@ -276,6 +276,7 @@
     (let [f (let [d (delay (this->v this))]
               (cc/fn [this']
                 (when (identical? this this')
+                  (prn d)
                   @d)))
           ;; we use mutable maps so we can always update the cache
           ;; on a cache-miss. if a library creates a spec using the position
@@ -309,6 +310,7 @@
             ~@args))))
 
 (defn- -construct-cached-schema-record [this cls-name this->spec this->explain]
+  (assert (symbol? cls-name))
   (doto this
     (-set-cached-record-field-fn cls-name :spec this->spec)
     (-set-cached-record-field-fn cls-name :explain this->explain)))
@@ -350,8 +352,9 @@
 (clojure.core/defn eq
   "A value that must be (= v)."
   [v]
-  (-construct-cached-schema-record
-    'EqSchema (EqSchema. v) -Eq-spec -Eq-explain))
+  (-> (EqSchema. v)
+      (-construct-cached-schema-record
+        'EqSchema -Eq-spec -Eq-explain)))
 
 
 ;;; isa (a child of parent)
@@ -502,7 +505,7 @@
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
-            (explain [_] @this))))))
+            (explain [_] @expl))))))
 
 (extend-protocol Schema
   #?(:clj java.util.regex.Pattern
@@ -1101,7 +1104,7 @@
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
-            (explain [_] @this))))))
+            (explain [_] @expl))))))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentMap
@@ -1135,7 +1138,7 @@
                 (original-syntax [_] this)
                 Schema
                 (spec [_] @sp)
-                (explain [_] @this)))))))
+                (explain [_] @expl)))))))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentSet
@@ -1234,48 +1237,42 @@
 
 (defn- -sequence-spec [this]
   (collection/collection-spec
-    {:pre
-     (spec/precondition
-       this
-       sequential-schema-pre-pred
-       #(list 'sequential? %))
-     :konstructor
-     vec
-     :options
-     (let [[singles multi] (parse-sequence-schema this)]
-       (reduce
-         (clojure.core/fn [more ^One s]
-           (if-not (.-optional? s)
-             (cons
-               (collection/one-element
-                 true (named (.-schema s) (.-name s))
-                 (clojure.core/fn [item-fn x]
-                   (if-let [x (seq x)]
-                     (do (item-fn (first x))
-                         (rest x))
-                     (do (item-fn
-                           (macros/validation-error
-                             (.-schema s) ::missing
-                             (list 'present? (.-name s))))
-                         nil))))
-               more)
-             [(collection/optional-tail
-                (named (.-schema s) (.-name s))
+    (spec/precondition
+      this
+      (clojure.core/fn [x] (or (nil? x) (sequential? x) #?(:clj (instance? java.util.List x))))
+      #(list 'sequential? %))
+    vec
+    (let [[singles multi] (parse-sequence-schema this)]
+      (reduce
+        (clojure.core/fn [more ^One s]
+          (if-not (.-optional? s)
+            (cons
+              (collection/one-element
+                true (named (.-schema s) (.-name s))
                 (clojure.core/fn [item-fn x]
-                  (when-let [x (seq x)]
-                    (item-fn (first x))
-                    (rest x)))
-                more)]))
-         (when multi
-           [(collection/all-elements multi)])
-         (reverse singles)))
-     :on-error
-     (clojure.core/fn [_ elts extra]
-       (let [head (mapv utils/error-val elts)]
-         (cond-> head
-           (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))
-     :params->pred (cc/fn [_] (assert nil 'TODO))
-     :params->pre-pred (cc/fn [_] sequential-schema-pre-pred)}))
+                  (if-let [x (seq x)]
+                    (do (item-fn (first x))
+                        (rest x))
+                    (do (item-fn
+                          (macros/validation-error
+                            (.-schema s) ::missing
+                            (list 'present? (.-name s))))
+                        nil))))
+              more)
+            [(collection/optional-tail
+               (named (.-schema s) (.-name s))
+               (clojure.core/fn [item-fn x]
+                 (when-let [x (seq x)]
+                   (item-fn (first x))
+                   (rest x)))
+               more)]))
+        (when multi
+          [(collection/all-elements multi)])
+        (reverse singles)))
+    (clojure.core/fn [_ elts extra]
+      (let [head (mapv utils/error-val elts)]
+        (cond-> head
+          (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))))
 
 (defn- -sequence-explain [this]
   (let [[singles multi] (parse-sequence-schema this)]
@@ -1295,7 +1292,7 @@
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
-            (explain [_] @this))))))
+            (explain [_] @expl))))))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentVector
@@ -1346,7 +1343,7 @@
   (macros/assert! (map? schema) "Expected map, got %s" (utils/type-of schema))
   (-> (with-meta (Record. klass schema) {:konstructor map-constructor})
       (-construct-cached-schema-record
-        'Record -Record-spec -Recursive-explain)))
+        'Record -Record-spec -Record-explain)))
 
 #?(:clj
 (defmacro record
