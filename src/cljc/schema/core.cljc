@@ -89,7 +89,7 @@
    [schema.spec.collection :as collection]
    [clojure.core :as cc])
   #?(:cljs (:require-macros [schema.macros :as macros :refer [defrecord-cached-schema soft-delay]]
-                            [schema.core :refer [defrecord-cached-schema]])))
+                            [schema.core])))
 
 #?(:clj (set! *warn-on-reflection* true))
 

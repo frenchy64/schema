@@ -254,7 +254,7 @@
                            #(case %
                               :spec +cached-record-specs+
                               :explain +cached-record-explains+))]
-        :cljs [->id (cc/fn [cls-name field]
+        :cljs [->id (fn [cls-name field]
                       (str "schema$core$" cls-name "$" (name field)))])
   (defn ^:internal -set-cached-record-field-fn [this cls-name field this->v]
     (let [f (let [d (soft-delay* #(this->v this))]

@@ -612,7 +612,7 @@
   (assert (symbol? this->explain))
   `(do (declare ~this->spec ~this->explain)
        (defrecord-schema ~n ~fs
-         schema.core/Schema
+         schema.core/Schema ;; must load schema.core
          (~'spec [this#] (utils/-get-cached-record-field this# '~n :spec ~this->spec))
          (~'explain [this#] (utils/-get-cached-record-field this# '~n :explain ~this->explain))
          ~@args)))
@@ -623,7 +623,7 @@
   (assert (symbol? this+params->checker))
   `(do (declare ~this->subschemas ~this+params->checker)
        (defrecord-schema ~n ~fs
-         schema.spec.core/CoreSpec
+         schema.spec.core/CoreSpec ;; must load schema.spec.core
          (~'subschemas [this#] (utils/-get-cached-record-field this# '~n :subschemas ~this->subschemas))
          (~'checker [this# params#] (utils/-get-cached-record-field [this# params#] '~n :checker #(~this+params->checker (nth % 0) (nth % 1))))
          ~@args)))
