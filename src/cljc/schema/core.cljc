@@ -986,33 +986,33 @@
   #?(:clj (clojure.lang.MapEntry. k v)
      :cljs (cljs.core.MapEntry. k v nil)))
 
-(defn- -map-entry-spec [key-schema val-schema]
-  (collection/collection-spec
-    spec/+no-precondition+
-    map-entry-ctor
-    [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
-     (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
-    (clojure.core/fn [[k] [xk xv] _]
-      (if-let [k-err (utils/error-val xk)]
-        [k-err 'invalid-key]
-        [k (utils/error-val xv)]))))
+(defn- -MapEntry-spec [^MapEntry this]
+  (let [key-schema (.-key-schema this)
+        val-schema (.-val-schema this)]
+    (collection/collection-spec
+      spec/+no-precondition+
+      map-entry-ctor
+      [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
+       (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
+      (clojure.core/fn [[k] [xk xv] _]
+        (if-let [k-err (utils/error-val xk)]
+          [k-err 'invalid-key]
+          [k (utils/error-val xv)])))))
 
-(defn- -map-entry-explain [key-schema val-schema]
-  (list 'map-entry? (explain key-schema) (explain val-schema)))
+(defn- -MapEntry-explain [^MapEntry this]
+  (let [key-schema (.-key-schema this)
+        val-schema (.-val-schema this)]
+    (list 'map-entry (explain key-schema) (explain val-schema))))
 
 ;; A schema for a single map entry.
-(macros/defrecord-schema MapEntry [key-schema val-schema]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-map-entry-spec key-schema val-schema)))
-  (explain [this] (or (force (::explain this))
-                      (-map-entry-explain key-schema val-schema))))
+(defrecord-cached-schema MapEntry [key-schema val-schema]
+  -MapEntry-spec
+  -MapEntry-explain)
 
 (clojure.core/defn map-entry [key-schema val-schema]
-  (let [this (MapEntry. key-schema val-schema)]
-    (assoc this
-           ::spec (delay (-map-entry-spec key-schema val-schema))
-           ::explain (delay (-map-entry-explain key-schema val-schema)))))
+  (-> (MapEntry. key-schema val-schema)
+      (-construct-cached-schema-record
+        'MapEntry -MapEntry-spec -MapEntry-explain)))
 
 (clojure.core/defn find-extra-keys-schema [map-schema]
   (let [key-schemata (remove specific-key? (keys map-schema))]
@@ -1160,27 +1160,29 @@
       :cljs cljs.core/PersistentQueue.EMPTY)
    col))
 
-(macros/defrecord-schema Queue [schema]
-  Schema
-  (spec [this]
+(defn- -Queue-spec [^Queue this]
+  (let [schema (.-schema this)]
     (collection/collection-spec
-     {:pre (spec/simple-precondition this queue?)
-      :konstructor as-queue
-      :options [(collection/all-elements schema)]
-      :on-error (clojure.core/fn [_ xs _] (into empty-queue (keep utils/error-val) xs))
-      :params->pred (cc/fn [params]
-                      (let [p (spec/pred (spec schema) params)]
-                        #(and (queue? %) (p %))))
-      :params->pre-pred (cc/fn [params]
-                          (let [p (spec/pre-pred (spec schema) params)]
-                            #(and (queue? %) (p %))))}))
-  (explain [this] (list 'queue (explain schema))))
+      (spec/simple-precondition this queue?)
+      as-queue
+      [(collection/all-elements schema)]
+      (clojure.core/fn [_ xs _] (as-queue (keep utils/error-val xs))))))
+
+(defn- -Queue-explain [^Queue this]
+  (let [schema (.-schema this)]
+    (list 'queue (explain schema))))
+
+(defrecord-cached-schema Queue [schema]
+  -Queue-spec
+  -Queue-explain)
 
 (clojure.core/defn queue
   "Defines a schema satisfied by instances of clojure.lang.PersistentQueue
   (clj.core/PersistentQueue in ClojureScript) whose values satisfy x."
   [x]
-  (Queue. x))
+  (-> (Queue. x)
+      (-construct-cached-schema-record
+        'Queue -Queue-spec -Queue-explain)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Sequence Schemas
