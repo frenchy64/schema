@@ -214,9 +214,7 @@
          :cljs this))))
 
 (defn- -class-schema [this]
-  (prn "-class-schema")
   (or (utils/get-syntax-schema this)
-      (prn "-class-schema" "miss")
       (utils/declare-syntax-schema!
         this
         (let [sp (delay (-class-spec this))
@@ -1295,9 +1293,7 @@
       multi (conj (explain multi)))))
 
 (defn- -sequence-schema [this]
-  (prn "-sequence-schema" this)
   (or (utils/get-syntax-schema this)
-      (println "miss")
       (utils/declare-syntax-schema!
         this
         (let [sp (delay (-sequence-spec this))
