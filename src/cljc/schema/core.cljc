@@ -262,34 +262,38 @@
   (extend-primitive booleans (Class/forName "[Z"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Helpers to create cached Schema records
+;;; Helpers to create cached fields in Schema records
 
+;; this gives us something similar to deftype's mutable fields or reify's closures,
+;; without having to change our public-facing API.
 ;; in schema.core to keep all defn's private even though we provide a macro
 
-(defn- -set-cached-record-field-fn [this qkw this->spec-or-explain]
-  #?(:clj (let [weak (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
-            (assoc this qkw (fn [this]
-                              (or (.get weak this)
-                                  (let [spec (this->spec-or-explain this)]
-                                    (.put weak this spec)
-                                    spec)))))
-     :cljs (do (gobject/set this (str "schema$core$" (name kqw))
-                            (let [d (delay (this->spec-or-explain this))]
-                              (fn [this']
-                                (when (identical? this this')
-                                  (deref d)))))
-               this)))
+(let #?(:clj [field->Map (let [+cached-record-specs+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))
+                               +cached-record-explains+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+                           #(case %
+                              :spec +cached-record-specs+
+                              :explain +cached-record-explains+))]
+        :cljs [->id (cc/fn [cls-name field]
+                      (str "schema$core$" cls-nme "$" (name field)))])
+  (defn- -set-cached-record-field-fn [this cls-name field this->v]
+    (let [f (let [d (delay (this->v this))]
+              (fn [this']
+                (when (identical? this this')
+                  @d)))
+          _ #?(:clj (let [^java.util.Map weak (field->Map field)]
+                      (.put weak this f)
+                      f)
+               :cljs (gobject/set this (->id cls-nme field) f))]
+      f))
 
-(defn- -get-cached-record-field [this qkw this->spec-or-explain]
-  #?(:clj (or (when-some [f (get this qkw)]
-                (f this))
-              (this->spec-or-explain this))
-     :cljs (let [id (str "schema$core$" (name kqw))]
-             (or (when-some [f (gobject/get this id)]
-                   (f this))
-                 (let [r (this->spec-or-explain this)]
-                   (gobject/set this id r)
-                   r)))))
+  (defn- -get-cached-record-field [this cls-nme field this->v]
+    (or (when-some [f #?(:clj (let [^java.util.Map weak (field->Map field)]
+                                (.get weak this))
+                         :cljs (gobject/get this (->id cls-nme field)))]
+          (f this))
+        ((-set-cached-record-field-fn
+           this cls-nme field this->v)
+         this))))
 
 #?(:clj
    (defmacro ^:private defrecord-cached-schema
@@ -298,14 +302,14 @@
      (assert (symbol? this->explain))
      `(macros/defrecord-schema ~n ~fs
         Schema
-        (~'spec [this#] (-get-cached-record-field this# ::spec ~this->spec))
-        (~'explain [this#] (-get-cached-record-field this# ::explain ~this->explain))
+        (~'spec [this#] (-get-cached-record-field this# '~n :spec ~this->spec))
+        (~'explain [this#] (-get-cached-record-field this# '~n :explain ~this->explain))
         ~@args)))
 
-(defn- -construct-cached-schema-record [this nme this->spec this->explain]
-  (-> this
-      (-set-cached-record-field-fn ::spec this->spec)
-      (-set-cached-record-field-fn ::explain this->explain)))
+(defn- -construct-cached-schema-record [this cls-name this->spec this->explain]
+  (doto this
+    (-set-cached-record-field-fn cls-name :spec this->spec)
+    (-set-cached-record-field-fn cls-name :explain this->explain)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -345,7 +349,7 @@
   "A value that must be (= v)."
   [v]
   (-construct-cached-schema-record
-    (EqSchema. v) -Eq-spec -Eq-explain))
+    'EqSchema (EqSchema. v) -Eq-spec -Eq-explain))
 
 
 ;;; isa (a child of parent)
@@ -371,8 +375,9 @@
   ([parent]
      (isa nil parent))
   ([h parent]
-     (-construct-cached-schema-record
-       (Isa. h parent) -Isa-spec -Isa-explain)))
+     (-> (Isa. h parent)
+         (-construct-cached-schema-record
+           'Isa -Isa-spec -Isa-explain))))
 
 
 ;;; enum (in a set of allowed values)
@@ -396,21 +401,29 @@
   [& vs]
   (-> (assoc (EnumSchema. (set vs)) ::original-vs vs)
       (-construct-cached-schema-record
-        -Enum-spec -Enum-explain)))
+        'Enum -Enum-spec -Enum-explain)))
 
 
 
 ;;; pred (matches all values for which p? returns truthy)
 
-(macros/defrecord-schema Predicate [p? pred-name]
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this p? #(list pred-name %))))
-  (explain [this]
+(defn- -Predicate-spec [^Predicate this]
+  (let [p? (.-p? this)
+        pred-name (.-pred-name this)]
+    (leaf/leaf-spec (spec/precondition this p? #(list pred-name %)))))
+
+(defn- -Predicate-explain [^Predicate this]
+  (let [p? (.-p? this)
+        pred-name (.-pred-name this)]
     (cond (= p? integer?) 'Int
           (= p? keyword?) 'Keyword
           (= p? symbol?) 'Symbol
           (= p? string?) 'Str
           :else (list 'pred pred-name))))
+
+(defrecord-cached-schema Predicate [p? pred-name]
+  -Predicate-spec
+  -Predicate-explain)
 
 (clojure.core/defn pred
   "A value for which p? returns true (and does not throw).
@@ -419,7 +432,9 @@
   ([p? pred-name]
      (when-not (ifn? p?)
        (macros/error! (utils/format* "Not a function: %s" p?)))
-     (Predicate. p? pred-name)))
+     (-> (Predicate. p? pred-name) 
+         (-construct-cached-schema-record
+           'Predicate -Predicate-spec -Predicate-explain))))
 
 
 ;;; protocol (which value must `satisfies?`)
