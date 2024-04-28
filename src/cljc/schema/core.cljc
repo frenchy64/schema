@@ -1132,17 +1132,35 @@
   [schema]
   (-> schema meta :ns))
 
+(clojure.core/defn ^:internal -defschema [{s :schema :keys [name nsym]}]
+  (let [name-schema #(vary-meta
+                       (schema-with-name % name)
+                       assoc :ns nsym)]
+    (name-schema
+      (if #?(:clj (instance? clojure.lang.IObj s)
+             :cljs (satisfies? IWithMeta s))
+        s
+        (let [sp (delay (spec s))
+              expl (delay (explain s))]
+          (reify
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl)))))))
+
 #?(:clj
 (defmacro defschema
-  "Convenience macro to make it clear to reader that body is meant to be used as a schema.
-   The name of the schema is recorded in the metadata."
+  "Convenience macro to make it clear to the reader that body is meant to be used as a schema
+   that also precomputes parts of the Schema for performance.
+
+   The name of the schema is recorded in the metadata. If metadata is not supported on
+   the schema, will be wrapped in a Schema in order to attach the metadata. The wrapper
+   implements SchemaSyntax to recover the wrapped value."
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
-     `(def ~name ~docstring
-        (vary-meta
-         (schema-with-name ~form '~name)
-         assoc :ns '~(ns-name *ns*))))))
+   `(def ~name ~docstring
+      (-defschema
+        {:schema ~form :name '~name :nsym '~(ns-name *ns*)})))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
