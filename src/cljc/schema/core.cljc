@@ -276,7 +276,7 @@
     (let [f (let [d (delay (this->v this))]
               (cc/fn [this']
                 (when (identical? this this')
-                  (prn d)
+                  (assert d)
                   @d)))
           ;; we use mutable maps so we can always update the cache
           ;; on a cache-miss. if a library creates a spec using the position
@@ -669,23 +669,27 @@
   -Conditional-spec
   -Conditional-explain)
 
-(defn- -Conditional-spec [preds-and-schemas error-symbol]
-  (variant/variant-spec
-    spec/+no-precondition+
-    (for [[p s] preds-and-schemas]
-      {:guard p :schema s})
-    #(list (or error-symbol
-               (if (= 1 (count preds-and-schemas))
-                 (symbol (utils/fn-name (ffirst preds-and-schemas)))
-                 'some-matching-condition?))
-           %)))
+(defn- -Conditional-spec [^ConditionalSchema this]
+  (let [preds-and-schemas (.-preds-and-schemas this)
+        error-symbol (.-error-symbol this)]
+    (variant/variant-spec
+      spec/+no-precondition+
+      (for [[p s] preds-and-schemas]
+        {:guard p :schema s})
+      #(list (or error-symbol
+                 (if (= 1 (count preds-and-schemas))
+                   (symbol (utils/fn-name (ffirst preds-and-schemas)))
+                   'some-matching-condition?))
+             %))))
 
-(defn- -Conditional-explain [preds-and-schemas error-symbol]
-  (cons 'conditional
-        (concat
-          (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
-                  preds-and-schemas)
-          (when error-symbol [error-symbol]))))
+(defn- -Conditional-explain [^ConditionalSchema this]
+  (let [preds-and-schemas (.-preds-and-schemas this)
+        error-symbol (.-error-symbol this)]
+    (cons 'conditional
+          (concat
+            (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
+                    preds-and-schemas)
+            (when error-symbol [error-symbol])))))
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -779,8 +783,7 @@
   [& schemas]
   (-> (CondPre. schemas)
       (-construct-cached-schema-record
-        -CondPre-spec
-        -CondPre-explain)))
+        'CondPre -CondPre-spec -CondPre-explain)))
 
 ;; constrained (post-condition on schema)
 
@@ -1386,8 +1389,7 @@
   -Fn-explain)
 
 (defn- -Fn-spec [this]
-  (leaf/leaf-spec (spec/simple-precondition this ifn?)
-                  ifn?))
+  (leaf/leaf-spec (spec/simple-precondition this ifn?)))
 
 (defn- -Fn-explain [^FnSchema this]
   (let [output-schema (.-output-schema this)
