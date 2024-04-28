@@ -173,7 +173,7 @@
 ;;; Registry for caching Schema's of classes and other non-IMeta's used for Schema syntax
 
 #?(:clj
-(let [^java.util.Map +id->syntax-schema+ (java.util.WeakHashMap.)]
+(let [^java.util.Map +id->syntax-schema+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
   (defn declare-syntax-schema!
     "Cache the schema for primitive (non-IMeta) Schema syntax."
     [id syntax-schema]
@@ -198,7 +198,7 @@
 ;;; Registry for fast class predicates
 
 #?(:clj
-   (let [class->pred (java.util.WeakHashMap.)]
+   (let [class->pred (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
      (defn register-class-pred!
        "Only register a pred at runtime, not during macroexpansion.
        This is so we can reduce generated code by checking if we've

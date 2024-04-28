@@ -180,6 +180,14 @@
                  (or (identical? klass (.-constructor %))
                      (js* "~{} instanceof ~{}" % klass)))))
 
+(comment
+  (time (spec Integer))
+  (time (spec java.util.Map))
+  (time (spec ['a]))
+  (time (spec [Integer]))
+  (time (spec (nth (iterate #(vector #{%}) (eq 100)) 100)))
+  )
+
 (clojure.core/defn instance-precondition
   ([s klass] (instance-precondition s klass (instance-pred klass)))
   ([s klass pred] (spec/precondition s pred #(list 'instance? klass %))))
@@ -206,7 +214,9 @@
          :cljs this))))
 
 (defn- -class-schema [this]
+  (prn "-class-schema")
   (or (utils/get-syntax-schema this)
+      (prn "-class-schema" "miss")
       (utils/declare-syntax-schema!
         this
         (let [sp (delay (-class-spec this))
@@ -1285,7 +1295,9 @@
       multi (conj (explain multi)))))
 
 (defn- -sequence-schema [this]
+  (prn "-sequence-schema" this)
   (or (utils/get-syntax-schema this)
+      (println "miss")
       (utils/declare-syntax-schema!
         this
         (let [sp (delay (-sequence-spec this))
