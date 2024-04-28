@@ -191,7 +191,7 @@
   (defn declare-syntax-schema! [id syntax-schema]
     (gobject/set id "schema$utils$syntax_schema" syntax-schema))
 
-  (defn get-syntax-schema [klass]
+  (defn get-syntax-schema [id]
     (gobject/get id "schema$utils$syntax_schema"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
