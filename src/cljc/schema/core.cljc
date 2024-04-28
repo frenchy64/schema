@@ -75,7 +75,7 @@
    See the docstrings of defrecord, fn, and defn for more details about how
    to use these macros."
   ;; don't exclude def because it's not a var.
-  (:refer-clojure :exclude [Keyword Symbol Inst atom defprotocol defrecord defn letfn defmethod fn MapEntry ->MapEntry any?])
+  (:refer-clojure :exclude [Keyword Symbol Inst atom defprotocol defrecord defn letfn defmethod fn MapEntry ->MapEntry])
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
@@ -163,9 +163,6 @@
    a 'validator' once and call it on each of them."
   [schema value]
   ((validator schema) value))
-
-(defn- any? [_] true)
-(defn- never? [_] false)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Platform-specific leaf Schemas
@@ -317,7 +314,7 @@
 
 ;;; Any matches anything (including nil)
 
-(def ^:private -Anything-spec (delay (leaf/leaf-spec spec/+no-precondition+ any?)))
+(def ^:private -Anything-spec (delay (leaf/leaf-spec spec/+no-precondition+)))
 
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
@@ -711,25 +708,21 @@
 (extend-protocol HasPrecondition
   schema.spec.leaf.LeafSpec
   (precondition [this]
-    (spec/pre-pred this nil))
+    (complement (.-pre ^schema.spec.leaf.LeafSpec this)))
 
   schema.spec.variant.VariantSpec
   (precondition [^schema.spec.variant.VariantSpec this]
-    (let [pre-pred (spec/pre-pred this nil)
-          f (reduce
-              (cc/fn [f {:keys [guard schema]}]
-                (let [p? (spec/pre-pred schema nil)
-                      g (if guard
-                          #(and (guard %) (p? %))
-                          p?)]
-                  #(or (g %) (f %))))
-              never? (rseq (.-options this)))]
-      #(and (pre-pred %)
-            (f %))))
+    (every-pred
+     (complement (.-pre this))
+     (apply some-fn
+            (for [{:keys [guard schema]} (.-options this)]
+              (if guard
+                (every-pred guard (precondition (spec schema)))
+                (precondition (spec schema)))))))
 
   schema.spec.collection.CollectionSpec
   (precondition [this]
-    (spec/pre-pred this nil)))
+    (complement (.-pre ^schema.spec.collection.CollectionSpec this))))
 
 (defn- -CondPre-spec [^CondPre this]
   (let [schemas (.-schemas this)]
