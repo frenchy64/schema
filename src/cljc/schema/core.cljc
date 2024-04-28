@@ -262,6 +262,53 @@
   (extend-primitive booleans (Class/forName "[Z"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Helpers to create cached Schema records
+
+;; in schema.core to keep all defn's private even though we provide a macro
+
+(defn- -set-cached-record-field-fn [this qkw this->spec-or-explain]
+  #?(:clj (let [weak (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+            (assoc this qkw (fn [this]
+                              (or (.get weak this)
+                                  (let [spec (this->spec-or-explain this)]
+                                    (.put weak this spec)
+                                    spec)))))
+     :cljs (do (gobject/set this (str "schema$core$" (name kqw))
+                            (let [d (delay (this->spec-or-explain this))]
+                              (fn [this']
+                                (when (identical? this this')
+                                  (deref d)))))
+               this)))
+
+(defn- -get-cached-record-field [this qkw this->spec-or-explain]
+  #?(:clj (or (when-some [f (get this qkw)]
+                (f this))
+              (this->spec-or-explain this))
+     :cljs (let [id (str "schema$core$" (name kqw))]
+             (or (when-some [f (gobject/get this id)]
+                   (f this))
+                 (let [r (this->spec-or-explain this)]
+                   (gobject/set this id r)
+                   r)))))
+
+#?(:clj
+   (defmacro ^:private defrecord-cached-schema
+     [n fs this->spec this->explain & args]
+     (assert (symbol? this->spec))
+     (assert (symbol? this->explain))
+     `(macros/defrecord-schema ~n ~fs
+        Schema
+        (~'spec [this#] (-get-cached-record-field this# ::spec ~this->spec))
+        (~'explain [this#] (-get-cached-record-field this# ::explain ~this->explain))
+        ~@args)))
+
+(defn- -construct-cached-schema-record [this nme this->spec this->explain]
+  (-> this
+      (-set-cached-record-field-fn ::spec this->spec)
+      (-set-cached-record-field-fn ::explain this->explain)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Cross-platform Schema leaves
 
 ;;; Any matches anything (including nil)
@@ -283,72 +330,73 @@
 
 ;;; eq (to a single allowed value)
 
-(defn- -Eq-explain [v]
-  (list 'eq v))
+(defn- -Eq-explain [^EqSchema this]
+  (list 'eq (.-v this)))
 
-(defn- -Eq-spec [this v]
-  (leaf/leaf-spec (spec/precondition this #(= v %) #(list '= v %))))
+(defn- -Eq-spec [^EqSchema this]
+  (let [v (.-v this)]
+    (leaf/leaf-spec (spec/precondition this #(= v %) #(list '= v %)))))
 
-(macros/defrecord-schema EqSchema [v]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-Eq-spec this v)))
-  (explain [this] (or (force (::explain this))
-                      (-Eq-explain v))))
+(defrecord-cached-schema EqSchema [v]
+  -Eq-spec
+  -Eq-explain)
 
 (clojure.core/defn eq
   "A value that must be (= v)."
   [v]
-  (let [this (EqSchema. v)]
-    (assoc this
-           ::spec (delay (-Eq-spec this v))
-           ::explain (delay (-Eq-explain v)))))
+  (-construct-cached-schema-record
+    (EqSchema. v) -Eq-spec -Eq-explain))
 
 
 ;;; isa (a child of parent)
 
-(macros/defrecord-schema Isa [h parent]
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this
-                                                  #(if h
-                                                     (isa? h % parent)
-                                                     (isa? % parent))
-                                                  #(list 'isa? % parent))))
-  (explain [this] (list 'isa? parent)))
+(defn- -Isa-spec [^Isa this]
+  (let [h (.-h this)
+        parent (.-parent this)]
+    (leaf/leaf-spec (spec/precondition this
+                                       (if h
+                                         #(isa? h % parent)
+                                         #(isa? % parent))
+                                       #(list 'isa? % parent)))))
+
+(defn- -Isa-explain [^Isa this]
+  (list 'isa? (.-parent this)))
+
+(defrecord-cached-schema Isa [h parent]
+  -Isa-spec
+  -Isa-explain)
 
 (clojure.core/defn isa
   "A value that must be a child of parent."
   ([parent]
-     (Isa. nil parent))
+     (isa nil parent))
   ([h parent]
-     (Isa. h parent)))
+     (-construct-cached-schema-record
+       (Isa. h parent) -Isa-spec -Isa-explain)))
 
 
 ;;; enum (in a set of allowed values)
 
-(defn- -Enum-spec [this vs]
-  (let [pred #(contains? vs %)]
+(defn- -Enum-spec [^EnumSchema this]
+  (let [vs (.-vs this)
+        pred #(contains? vs %)]
     (leaf/leaf-spec (spec/precondition this pred #(list vs %))
                     pred)))
 
-(defn- -Enum-explain [vs]
-  (cons 'enum vs))
+(defn- -Enum-explain [^EnumSchema this]
+  (cons 'enum (or (::original-vs this)
+                  (.-vs this))))
 
-(macros/defrecord-schema EnumSchema [vs]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-Enum-spec this vs)))
-  (explain [this] (or (force (::explain this))
-                      (-Enum-explain vs))))
+(defrecord-cached-schema EnumSchema [vs]
+  -Enum-spec
+  -Enum-explain)
 
 (clojure.core/defn enum
   "A value that must be = to some element of vs."
   [& vs]
-  (let [vs' (set vs)
-        this (EnumSchema. vs')]
-    (assoc this
-           ::spec (delay (-Enum-spec this vs'))
-           ::explain (delay (-Enum-explain vs)))))
+  (-> (assoc (EnumSchema. (set vs)) ::original-vs vs)
+      (-construct-cached-schema-record
+        -Enum-spec -Enum-explain)))
 
 
 
@@ -586,24 +634,30 @@
 
 ;;; conditional (choice of schema, based on predicates on the value)
 
+(defn- -Conditional-spec [preds-and-schemas error-symbol]
+  (variant/variant-spec
+    spec/+no-precondition+
+    (for [[p s] preds-and-schemas]
+      {:guard p :schema s})
+    #(list (or error-symbol
+               (if (= 1 (count preds-and-schemas))
+                 (symbol (utils/fn-name (ffirst preds-and-schemas)))
+                 'some-matching-condition?))
+           %)))
+
+(defn- -Conditional-explain [preds-and-schemas error-symbol]
+  (cons 'conditional
+        (concat
+          (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
+                  preds-and-schemas)
+          (when error-symbol [error-symbol]))))
+
 (macros/defrecord-schema ConditionalSchema [preds-and-schemas error-symbol]
   Schema
-  (spec [this]
-    (variant/variant-spec
-     spec/+no-precondition+
-     (for [[p s] preds-and-schemas]
-       {:guard p :schema s})
-     #(list (or error-symbol
-                (if (= 1 (count preds-and-schemas))
-                  (symbol (utils/fn-name (ffirst preds-and-schemas)))
-                  'some-matching-condition?))
-            %)))
-  (explain [this]
-    (cons 'conditional
-          (concat
-           (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
-                   preds-and-schemas)
-           (when error-symbol [error-symbol])))))
+  (spec [this] (or (force (::spec this))
+                   (-Conditional-spec preds-and-schemas error-symbol)))
+  (explain [this] (or (force (::explain this))
+                      (-Conditional-explain preds-and-schemas error-symbol))))
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -622,12 +676,15 @@
             (symbol? (last preds-and-schemas))))
    "Expected even, nonzero number of args (with optional trailing symbol); got %s"
    (count preds-and-schemas))
-  (ConditionalSchema.
-   (vec
-    (for [[pred schema] (partition 2 preds-and-schemas)]
-      (do (macros/assert! (ifn? pred) (str "Conditional predicate " pred " must be a function"))
-          [(if (= pred :else) (constantly true) pred) schema])))
-   (if (odd? (count preds-and-schemas)) (last preds-and-schemas))))
+  (let [preds-and-schemas (vec
+                            (for [[pred schema] (partition 2 preds-and-schemas)]
+                              (do (macros/assert! (ifn? pred) (str "Conditional predicate " pred " must be a function"))
+                                  [(if (= pred :else) (constantly true) pred) schema])))
+        error-symbol (if (odd? (count preds-and-schemas)) (last preds-and-schemas))
+        this (ConditionalSchema. preds-and-schemas error-symbol)]
+    (assoc this
+           ::spec (delay (-Conditional-explain preds-and-schemas error-symbol)))
+    ))
 
 
 ;; cond-pre (conditional based on surface type)
