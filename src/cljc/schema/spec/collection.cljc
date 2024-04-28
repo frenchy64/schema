@@ -13,22 +13,21 @@
 
 (declare sequence-transformer)
 
-(defn- element-transformer [e params then remaining-schema-allowed?]
+(defn- element-transformer [e params then]
   (if (vector? e)
-    (case (nth e 0)
+    (case (first e)
       ::optional
-      (sequence-transformer (subvec e 1) params then)
+      (sequence-transformer (next e) params then)
 
       ::remaining
-      (let [_ (macros/assert! remaining-schema-allowed? "Remaining schemas must be in tail position.")
-            _ (macros/assert! (= 2 (count e)) "remaining can have only one schema.")
-            c (spec/sub-checker (nth e 1) params)]
+      (let [_ (macros/assert! (= 2 (count e)) "remaining can have only one schema.")
+            c (spec/sub-checker (second e) params)]
         #?(:clj (fn [^java.util.List res x]
                   (doseq [i x]
                     (.add res (c i)))
                   (then res nil))
            :cljs (fn [res x]
-                   (swap! res into (map c) x)
+                   (swap! res into (map c x))
                    (then res nil)))))
 
     (let [parser (:parser e)
@@ -39,13 +38,13 @@
                  (then res (parser (fn [t] (swap! res conj (if (utils/error? t) t (c t)))) x)))))))
 
 (defn- sequence-transformer [elts params then]
-  (if (zero? (count elts))
-    then
-    (reduce
-      (fn [f e]
-        (element-transformer e params f false))
-      (element-transformer (peek elts) params then true)
-      (-> elts pop rseq))))
+  (macros/assert! (not-any? #(and (vector? %) (= (first %) ::remaining)) (butlast elts))
+                  "Remaining schemas must be in tail position.")
+  (reduce
+   (fn [f e]
+     (element-transformer e params f))
+   then
+   (reverse elts)))
 
 #?(:clj ;; for performance
 (defn- has-error? [^java.util.List l]

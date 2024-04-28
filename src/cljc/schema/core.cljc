@@ -142,15 +142,9 @@
   "Compile an efficient checker for schema, which returns nil for valid values and
    error descriptions otherwise."
   [schema]
-  (let [explainer (comp utils/error-val
-                        (spec/run-checker
-                          (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema))
-        ;pred (predicate schema)
-        ]
-    #_(assert pred schema)
-    #(if nil #_(try (pred %) (catch Throwable _))
-       nil
-       (explainer %))))
+  (comp utils/error-val
+        (spec/run-checker
+         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -188,10 +182,11 @@
 ;; function prototype checks objects for compatibility. In BB, defrecord classes can also be
 ;; instances of sci.lang.Type, and the interpreter extends `instance?` to support it as first arg.
 
-(clojure.core/defn instance-pred [klass]
+(defn- instance-pred [klass]
   #?(:bb #(instance? klass %)
      :clj (or (utils/get-class-pred klass)
-              (utils/register-class-pred! klass (eval `#(instance? ~klass %))))
+              (try (utils/register-class-pred! klass (eval `#(instance? ~klass %)))
+                   (catch Exception _ #(instance? klass %))))
      :cljs #(and (not (nil? %))
                  (or (identical? klass (.-constructor %))
                      (js* "~{} instanceof ~{}" % klass)))))
@@ -201,17 +196,14 @@
   ([s klass pred] (spec/precondition s pred #(list 'instance? klass %))))
 
 (defn- -class-spec [this]
-  (or (utils/get-spec this)
-      (utils/declare-spec!
-        this
-        (let [pred (instance-pred this)
-              pre (instance-precondition this this pred)]
-          (if-let [class-schema (utils/class-schema this)]
-            (variant/variant-spec
-              {:pre pre :options [{:schema class-schema}]
-               :parent this :params->pred (cc/fn [_] pred)
-               :params->pre-pred (cc/fn [_] pred)})
-            (leaf/leaf-spec pre pred))))))
+  (let [pred (instance-pred this)
+        pre (instance-precondition this this pred)]
+    (if-let [class-schema (utils/class-schema this)]
+      (variant/variant-spec
+        {:pre pre :options [{:schema class-schema}]
+         :parent this :params->pred (cc/fn [_] pred)
+         :params->pre-pred (cc/fn [_] pred)})
+      (leaf/leaf-spec pre pred))))
 
 (defn- -class-explain [this]
   (if-let [more-schema (utils/class-schema this)]
@@ -235,6 +227,8 @@
         (let [sp (delay (-class-spec this))
               expl (delay (-class-explain this))]
           (reify
+            SchemaSyntax
+            (original-syntax [_] this)
             Schema
             (spec [_] @sp)
             (explain [_] @expl))))))
@@ -305,10 +299,10 @@
 
 ;;; eq (to a single allowed value)
 
-(defn ^:private -Eq-explain [v]
+(defn- -Eq-explain [v]
   (list 'eq v))
 
-(defn ^:private -Eq-spec [this v]
+(defn- -Eq-spec [this v]
   (let [pred #(= v %)]
     (leaf/leaf-spec (spec/precondition this pred #(list '= v %))
                     pred)))
@@ -350,12 +344,12 @@
 
 ;;; enum (in a set of allowed values)
 
-(defn ^:private -Enum-spec [this vs]
+(defn- -Enum-spec [this vs]
   (let [pred #(contains? vs %)]
     (leaf/leaf-spec (spec/precondition this pred #(list vs %))
                     pred)))
 
-(defn ^:private -Enum-explain [vs]
+(defn- -Enum-explain [vs]
   (cons 'enum vs))
 
 (macros/defrecord-schema EnumSchema [vs]
@@ -942,48 +936,33 @@
   #?(:clj (clojure.lang.MapEntry. k v)
      :cljs (cljs.core.MapEntry. k v nil)))
 
+(defn- -map-entry-spec [key-schema val-schema]
+  (collection/collection-spec
+    spec/+no-precondition+
+    map-entry-ctor
+    [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
+     (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
+    (clojure.core/fn [[k] [xk xv] _]
+      (if-let [k-err (utils/error-val xk)]
+        [k-err 'invalid-key]
+        [k (utils/error-val xv)]))))
+
+(defn- -map-entry-explain [key-schema val-schema]
+  (list 'map-entry? (explain key-schema) (explain val-schema)))
+
 ;; A schema for a single map entry.
 (macros/defrecord-schema MapEntry [key-schema val-schema]
   Schema
-  (spec [this]
-    (let [konstructor map-entry-ctor
-          elements [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
-                    (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
-          on-error (clojure.core/fn [[k] [xk xv] _]
-                     (if-let [k-err (utils/error-val xk)]
-                       [k-err 'invalid-key]
-                       [k (utils/error-val xv)]))]
-      (reify
-        spec/CoreSpec
-        (subschemas [_] [key-schema val-schema])
-        (checker [_ {:keys [return-walked?] :as params}]
-          (let [kchecker (spec/checker key-schema params)
-                vchecker (spec/checker val-schema params)
-                pre-fail (if return-walked? identity #(list 'not (list 'map-entry? %)))
-                ctor (if return-walked? map-entry-ctor (cc/fn [_ _] nil))]
-            (cc/fn [x]
-              (if-not (map-entry? x)
-                (pre-fail x)
-                (let [kerr (kchecker (key x))
-                      verr (vchecker (val x))]
-                  (when (or kerr verr)
-                    (ctor kerr verr)))))))
-        spec/PredSpec
-        (pred [_ params]
-          (let [kp (pred key-schema params)
-                kv (pred val-schema params)]
-            (cc/fn [e]
-              (and (map-entry? e)
-                   (kp (key e))
-                   (kv (val e)))))))))
-  (explain [this]
-    (list
-     'map-entry?
-     (explain key-schema)
-     (explain val-schema))))
+  (spec [this] (or (force (::spec this))
+                   (-map-entry-spec key-schema val-schema)))
+  (explain [this] (or (force (::explain this))
+                      (-map-entry-explain key-schema val-schema))))
 
 (clojure.core/defn map-entry [key-schema val-schema]
-  (MapEntry. key-schema val-schema))
+  (let [this (MapEntry. key-schema val-schema)]
+    (assoc this
+           ::spec (delay (-map-entry-spec key-schema val-schema))
+           ::explain (delay (-map-entry-explain key-schema val-schema)))))
 
 (clojure.core/defn find-extra-keys-schema [map-schema]
   (let [key-schemata (remove specific-key? (keys map-schema))]
@@ -1047,6 +1026,11 @@
     (map-elements this)
     (map-error)))
 
+(clojure.core/defn- map-explain [this]
+  (reduce-kv (cc/fn [m k v]
+               (assoc m (explain-kspec k) (explain v)))
+             {} this))
+
 (defn- -map-schema [this]
   (or (utils/get-syntax-schema this)
       (utils/declare-syntax-schema!
@@ -1059,11 +1043,6 @@
             Schema
             (spec [_] @sp)
             (explain [_] @this))))))
-
-(clojure.core/defn- map-explain [this]
-  (reduce-kv (fn [m k v]
-               (assoc m (explain-kspec k) (explain v)))
-             {} this))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentMap
@@ -1417,7 +1396,7 @@
   [schema]
   (-> schema meta :ns))
 
-(defn ^:internal -defschema [{s :schema :keys [name nsym]}]
+(cc/defn ^:internal -defschema [{s :schema :keys [name nsym]}]
   (let [name-schema #(vary-meta
                        (schema-with-name % name)
                        assoc :ns nsym)]
