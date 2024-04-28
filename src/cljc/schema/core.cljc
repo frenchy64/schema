@@ -459,6 +459,12 @@
 (defn- -Protocol-explain [this]
   (list 'protocol (protocol-name this)))
 
+;;added to avoid making -construct-cached-schema-record public
+(defn protocol* [this]
+  (-> this
+      (-construct-cached-schema-record
+        'Protocol -Protocol-spec -Protocol-explain)))
+
 ;; The cljs version is macros/protocol by necessity, since cljs `satisfies?` is a macro.
 #?(:clj
 (defmacro protocol
@@ -470,11 +476,10 @@
 
    A macro for cljs sake, since `satisfies?` is a macro in cljs."
   [p]
-  `(-> (with-meta (->Protocol ~p)
-                  {:proto-pred #(satisfies? ~p %)
-                   :proto-sym '~p})
-       (-construct-cached-schema-record
-         '~'Protocol -Protocol-spec -Protocol-explain))))
+  `(protocol*
+     (with-meta (->Protocol ~p)
+                {:proto-pred #(satisfies? ~p %)
+                 :proto-sym '~p}))))
 
 
 ;;; regex (validates matching Strings)
@@ -570,7 +575,7 @@
   -Maybe-spec
   -Maybe-explain)
 
-(let [nil-option (delay {:guard nil? :schema nil-schema})]
+(let [nil-option (delay {:guard nil? :schema (eq nil)})]
   (defn- -Maybe-spec [^Maybe this]
     (let [schema (.-schema this)]
       (variant/variant-spec
@@ -1112,26 +1117,23 @@
 ;; A set schema is a Clojure set with a single element, a schema that all values must satisfy
 
 (defn- -set-schema [this]
-  (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
   (or (utils/get-syntax-schema this)
-      (utils/declare-syntax-schema!
-        this
-        (let [sp (delay (collection/collection-spec
-                          {:pre (spec/simple-precondition this set?)
-                           :konstructor set
-                           :options [(collection/all-elements (first this))]
-                           :on-error (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))
-                           :params->pred (cc/fn [params]
-                                           (let [p (spec/pred (spec (first this)) params)]
-                                             #(and (set? %) (p %))))
-                           :params->pre-pred (cc/fn [_] set?)}))
-              expl (delay #{(explain (first this))})]
-          (reify
-            SchemaSyntax
-            (original-syntax [_] this)
-            Schema
-            (spec [_] @sp)
-            (explain [_] @this))))))
+      (do (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
+          (utils/declare-syntax-schema!
+            this
+            (let [sp (delay
+                       (collection/collection-spec
+                         (spec/simple-precondition this set?)
+                         set
+                         [(collection/all-elements (first this))]
+                         (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))))
+                  expl (delay #{(explain (first this))})]
+              (reify
+                SchemaSyntax
+                (original-syntax [_] this)
+                Schema
+                (spec [_] @sp)
+                (explain [_] @this)))))))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentSet
