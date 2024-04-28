@@ -1132,17 +1132,37 @@
   [schema]
   (-> schema meta :ns))
 
+(clojure.core/defn ^:internal -defschema [{s :schema :keys [name nsym]}]
+  (let [name-schema #(vary-meta
+                       (schema-with-name % name)
+                       assoc :ns nsym)]
+    (name-schema
+      (if #?(:clj (instance? clojure.lang.IObj s)
+             :cljs (satisfies? IWithMeta s))
+        s
+        (let [sp (delay (spec s))
+              expl (delay (explain s))]
+          (reify
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl)))))))
+
 #?(:clj
 (defmacro defschema
-  "Convenience macro to make it clear to reader that body is meant to be used as a schema.
-   The name of the schema is recorded in the metadata."
+  "Convenience macro to make it clear to the reader that body is meant to be used as a schema
+   that also precomputes parts of the Schema for performance.
+
+   The name of the schema is recorded in the metadata. If metadata is not supported on
+   the schema, will be wrapped in a Schema in order to attach the metadata.
+ 
+   TODO:
+   The wrapper implements a protocol to recover the wrapped value."
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
-     `(def ~name ~docstring
-        (vary-meta
-         (schema-with-name ~form '~name)
-         assoc :ns '~(ns-name *ns*))))))
+   `(def ~name ~docstring
+      (-defschema
+        {:schema ~form :name '~name :nsym '~(ns-name *ns*)})))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1573,3 +1593,31 @@
   "Sets the maximum length of value to be output before it is contracted to a prettier name."
   [max-length]
   (reset! utils/max-value-length max-length))
+
+(comment
+(defschema Bar (nth (iterate #(vector #{%}) Integer) 100))
+(dotimes [_ 10]
+  (time (spec Bar)))
+;="Elapsed time: 0.926795 msecs"
+;="Elapsed time: 0.055069 msecs"
+;="Elapsed time: 0.02755 msecs"
+;="Elapsed time: 0.02287 msecs"
+;="Elapsed time: 0.018021 msecs"
+;="Elapsed time: 0.020887 msecs"
+;="Elapsed time: 0.023733 msecs"
+;="Elapsed time: 0.02642 msecs"
+;="Elapsed time: 0.022624 msecs"
+;="Elapsed time: 0.034662 msecs"
+(dotimes [_ 10]
+  (time (spec (nth (iterate #(vector #{%}) Integer) 100))))
+;="Elapsed time: 0.298001 msecs"
+;="Elapsed time: 0.171665 msecs"
+;="Elapsed time: 0.231007 msecs"
+;="Elapsed time: 0.324284 msecs"
+;="Elapsed time: 0.105173 msecs"
+;="Elapsed time: 0.083637 msecs"
+;="Elapsed time: 0.090645 msecs"
+;="Elapsed time: 0.087503 msecs"
+;="Elapsed time: 0.098164 msecs"
+;="Elapsed time: 0.06527 msecs"
+  )
