@@ -774,19 +774,24 @@
 
 ;; constrained (post-condition on schema)
 
-(macros/defrecord-schema Constrained [schema postcondition post-name]
-  Schema
-  (spec [this]
+(defn- -Constrained-spec [^Constrained this]
+  (let [schema (.-schema this)
+        postcondition (.-postcondition this)
+        post-name (.-post-name this)]
     (variant/variant-spec
-     {:pre spec/+no-precondition+
-      :options [{:schema schema}]
-      :post (spec/precondition this postcondition #(list post-name %))
-      :params->pred (cc/fn [params]
-                      (let [pred (spec/pred (spec schema) params)]
-                        #(and (pred %) (postcondition %))))
-      :params->pre-pred (cc/fn [_] any?)}))
-  (explain [this]
+      spec/+no-precondition+
+      [{:schema schema}]
+      nil
+      (spec/precondition this postcondition #(list post-name %)))))
+
+(defn- -Constrained-explain [^Constrained this]
+  (let [schema (.-schema this)
+        post-name (.-post-name this)]
     (list 'constrained (explain schema) post-name)))
+
+(defrecord-cached-schema Constrained [schema postcondition post-name]
+  -Constrained-spec
+  -Constrained-explain)
 
 (clojure.core/defn constrained
   "A schema with an additional post-condition.  Differs from `conditional`
@@ -797,7 +802,9 @@
   ([s p? pred-name]
      (when-not (ifn? p?)
        (macros/error! (utils/format* "Not a function: %s" p?)))
-     (Constrained. s p? pred-name)))
+     (-> (Constrained. s p? pred-name)
+         (-construct-cached-schema-record
+           'Constrained -Constrained-spec -Constrained-explain))))
 
 ;;; both (satisfies this schema and that one)
 
