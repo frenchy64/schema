@@ -274,7 +274,7 @@
                       (str "schema$core$" cls-nme "$" (name field)))])
   (defn- -set-cached-record-field-fn [this cls-name field this->v]
     (let [f (let [d (delay (this->v this))]
-              (fn [this']
+              (cc/fn [this']
                 (when (identical? this this')
                   @d)))
           _ #?(:clj (let [^java.util.Map weak (field->Map field)]
