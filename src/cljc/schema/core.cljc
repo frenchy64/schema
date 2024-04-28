@@ -808,10 +808,14 @@
 
 ;;; both (satisfies this schema and that one)
 
-(macros/defrecord-schema Both [schemas]
-  Schema
-  (spec [this] this)
-  (explain [this] (cons 'both (map explain schemas)))
+(defn- -Both-spec [this] this)
+
+(defn- -Both-explain [^Both this]
+  (cons 'both (map explain schemas)))
+
+(defrecord-cached-schema Both [schemas]
+  -Both-spec
+  -Both-explain
   HasPrecondition
   (precondition [this]
     (apply every-pred (map (comp precondition spec) schemas)))
@@ -825,21 +829,7 @@
            (if (utils/error? tx)
              tx
              (f (or tx x))))))
-     (map #(spec/sub-checker {:schema %} params) (rseq schemas))))
-  spec/PredSpec
-  (pred [this params]
-    (reduce
-     (cc/fn [f s]
-       (let [p? (spec/pred (spec s) params)]
-         #(and (p? %) (f %))))
-     any? (rseq schemas)))
-  spec/PrePredSpec
-  (pre-pred [this params]
-    (reduce
-     (cc/fn [f s]
-       (let [p? (spec/pre-pred (spec s) params)]
-         #(and (p? %) (f %))))
-     any? (rseq schemas))))
+     (map #(spec/sub-checker {:schema %} params) (reverse schemas)))))
 
 (clojure.core/defn ^{:deprecated "1.0.0"} both
   "A value that must satisfy every schema in schemas.
@@ -849,7 +839,9 @@
 
    When used with coercion, coerces each schema in sequence."
   [& schemas]
-  (Both. (vec schemas)))
+  (-> (Both. schemas)
+      (-construct-cached-schema-record
+        'Both -Both-spec -Both-explain)))
 
 
 (clojure.core/defn if
@@ -870,11 +862,7 @@
 
 (macros/defrecord-schema Recursive [derefable]
   Schema
-  (spec [this] (variant/variant-spec
-                 {:pre spec/+no-precondition+
-                  :options [{:schema @derefable}]
-                  :params->pred #(spec/pred (spec @derefable) %)
-                  :params->pre-pred #(spec/pre-pred (spec @derefable) %)}))
+  (spec [this] (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}]))
   (explain [this]
     (list 'recursive
           (if #?(:clj (var? derefable)
@@ -908,16 +896,10 @@
   Schema
   (spec [this]
     (collection/collection-spec
-      {:pre (spec/simple-precondition this atom?)
-       :konstructor clojure.core/atom
-       :elements
-       [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
-       :on-error
-       (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))
-       :params->pred (cc/fn [params]
-                       (let [p (spec/pred (spec schema) params)]
-                         #(and (atom? %) (p %))))
-       :params->pre-pred (cc/fn [_] atom?)}))
+     (spec/simple-precondition this atom?)
+     clojure.core/atom
+     [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
+     (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))))
   (explain [this] (list 'atom (explain schema))))
 
 (clojure.core/defn atom
