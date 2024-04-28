@@ -223,3 +223,18 @@
   #?(:bb (atom false)
      :clj (java.util.concurrent.atomic.AtomicReference. false)
      :cljs (atom false)))
+
+(defn soft-delay* [f]
+  #?(:clj (let [v (volatile! nil)]
+            (reify
+              clojure.lang.IDeref
+              (deref [_]
+                (or (when-some [^java.lang.ref.SoftReference r @v]
+                      (.get r))
+                    (let [res (f)]
+                      (vreset! v (java.lang.ref.SoftReference. res))
+                      res)))))
+     :cljs (reify
+             cljs.core/IDeref
+             ;;TODO WeakRef? https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakRef
+             (-deref [_] (f)))))

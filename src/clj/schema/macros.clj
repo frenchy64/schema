@@ -597,5 +597,5 @@
   [on?]
   (reset! *compile-fn-validation* on?))
 
-(defmacro defprotocol-once [n & args]
-  )
+(defmacro soft-delay [& body]
+  `(utils/soft-delay* #(do ~@body)))

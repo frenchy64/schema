@@ -79,7 +79,7 @@
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
-   #?(:clj [schema.macros :as macros])
+   #?(:clj [schema.macros :as macros :refer [soft-delay]])
    #?(:cljs [goog.object :as gobject])
    [schema.protocols :as prot]
    [schema.utils :as utils]
@@ -88,8 +88,8 @@
    [schema.spec.variant :as variant]
    [schema.spec.collection :as collection]
    [clojure.core :as cc])
-  #?(:cljs (:require-macros [schema.macros :as macros]
-                            [schema.core :refer [defrecord-cached-schema soft-delay]])))
+  #?(:cljs (:require-macros [schema.macros :as macros :refer [soft-delay]]
+                            [schema.core :refer [defrecord-cached-schema]])))
 
 #?(:clj (set! *warn-on-reflection* true))
 
@@ -215,25 +215,6 @@
                            (symbol (str this))))
                   (symbol (.getName ^Class this)))
          :cljs this))))
-
-(clojure.core/defn soft-delay* [f]
-  #?(:clj (let [v (volatile! nil)]
-            (reify
-              clojure.lang.IDeref
-              (deref [_]
-                (or (when-some [^java.lang.ref.SoftReference r @v]
-                      (.get r))
-                    (let [res (f)]
-                      (vreset! v (java.lang.ref.SoftReference. res))
-                      res)))))
-     :cljs (reify
-             cljs.core.IDeref
-             ;;TODO WeakRef? https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakRef
-             (-deref [_] (f)))))
-
-#?(:clj
-   (defmacro soft-delay [& body]
-     `(soft-delay* #(do ~@body))))
 
 (defn- -class-schema [this]
   (or (utils/get-syntax-schema this)
