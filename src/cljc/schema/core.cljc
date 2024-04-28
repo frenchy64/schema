@@ -386,10 +386,8 @@
   -Enum-explain)
 
 (defn- -Enum-spec [^EnumSchema this]
-  (let [vs (.-vs this)
-        pred #(contains? vs %)]
-    (leaf/leaf-spec (spec/precondition this pred #(list vs %))
-                    pred)))
+  (let [vs (.-vs this)]
+    (leaf/leaf-spec (spec/precondition this #(contains? vs %) #(list vs %)))))
 
 (defn- -Enum-explain [^EnumSchema this]
   (cons 'enum (or (::original-vs this)
@@ -460,7 +458,7 @@
   (list 'protocol (protocol-name this)))
 
 ;;added to avoid making -construct-cached-schema-record public
-(defn protocol* [this]
+(clojure.core/defn protocol* [this]
   (-> this
       (-construct-cached-schema-record
         'Protocol -Protocol-spec -Protocol-explain)))
@@ -1416,8 +1414,7 @@
   (macros/assert! (apply distinct? (map arity input-schemas)) "Arities must be distinct")
   (-> (FnSchema. output-schema (sort-by arity input-schemas))
       (-construct-cached-schema-record
-        -Fn-spec
-        -Fn-explain)))
+        'Fn -Fn-spec -Fn-explain)))
 
 #?(:clj
 (defmacro =>*
