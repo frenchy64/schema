@@ -297,11 +297,12 @@
      [n fs this->spec this->explain & args]
      (assert (symbol? this->spec))
      (assert (symbol? this->explain))
-     `(macros/defrecord-schema ~n ~fs
-        Schema
-        (~'spec [this#] (-get-cached-record-field this# '~n :spec ~this->spec))
-        (~'explain [this#] (-get-cached-record-field this# '~n :explain ~this->explain))
-        ~@args)))
+     `(do (declare ~this->spec ~this->explain)
+          (macros/defrecord-schema ~n ~fs
+            Schema
+            (~'spec [this#] (-get-cached-record-field this# '~n :spec ~this->spec))
+            (~'explain [this#] (-get-cached-record-field this# '~n :explain ~this->explain))
+            ~@args))))
 
 (defn- -construct-cached-schema-record [this cls-name this->spec this->explain]
   (doto this
@@ -331,16 +332,16 @@
 
 ;;; eq (to a single allowed value)
 
+(defrecord-cached-schema EqSchema [v]
+  -Eq-spec
+  -Eq-explain)
+
 (defn- -Eq-explain [^EqSchema this]
   (list 'eq (.-v this)))
 
 (defn- -Eq-spec [^EqSchema this]
   (let [v (.-v this)]
     (leaf/leaf-spec (spec/precondition this #(= v %) #(list '= v %)))))
-
-(defrecord-cached-schema EqSchema [v]
-  -Eq-spec
-  -Eq-explain)
 
 (clojure.core/defn eq
   "A value that must be (= v)."
@@ -350,6 +351,10 @@
 
 
 ;;; isa (a child of parent)
+
+(defrecord-cached-schema Isa [h parent]
+  -Isa-spec
+  -Isa-explain)
 
 (defn- -Isa-spec [^Isa this]
   (let [h (.-h this)
@@ -363,9 +368,6 @@
 (defn- -Isa-explain [^Isa this]
   (list 'isa? (.-parent this)))
 
-(defrecord-cached-schema Isa [h parent]
-  -Isa-spec
-  -Isa-explain)
 
 (clojure.core/defn isa
   "A value that must be a child of parent."
@@ -379,6 +381,10 @@
 
 ;;; enum (in a set of allowed values)
 
+(defrecord-cached-schema EnumSchema [vs]
+  -Enum-spec
+  -Enum-explain)
+
 (defn- -Enum-spec [^EnumSchema this]
   (let [vs (.-vs this)
         pred #(contains? vs %)]
@@ -389,9 +395,6 @@
   (cons 'enum (or (::original-vs this)
                   (.-vs this))))
 
-(defrecord-cached-schema EnumSchema [vs]
-  -Enum-spec
-  -Enum-explain)
 
 (clojure.core/defn enum
   "A value that must be = to some element of vs."
@@ -403,6 +406,10 @@
 
 
 ;;; pred (matches all values for which p? returns truthy)
+
+(defrecord-cached-schema Predicate [p? pred-name]
+  -Predicate-spec
+  -Predicate-explain)
 
 (defn- -Predicate-spec [^Predicate this]
   (let [p? (.-p? this)
@@ -417,10 +424,6 @@
           (= p? symbol?) 'Symbol
           (= p? string?) 'Str
           :else (list 'pred pred-name))))
-
-(defrecord-cached-schema Predicate [p? pred-name]
-  -Predicate-spec
-  -Predicate-explain)
 
 (clojure.core/defn pred
   "A value for which p? returns true (and does not throw).
@@ -439,6 +442,12 @@
 (clojure.core/defn protocol-name [protocol]
   (-> protocol meta :proto-sym))
 
+;; In cljs, satisfies? is a macro so we must precompile (partial satisfies? p)
+;; and put it in metadata of the record so that equality is preserved, along with the name.
+(defrecord-cached-schema Protocol [p]
+  -Protocol-spec
+  -Protocol-explain)
+
 (defn- -Protocol-spec [^Protocol this]
   (let [p (.-p this)]
     (leaf/leaf-spec
@@ -449,12 +458,6 @@
 
 (defn- -Protocol-explain [this]
   (list 'protocol (protocol-name this)))
-
-;; In cljs, satisfies? is a macro so we must precompile (partial satisfies? p)
-;; and put it in metadata of the record so that equality is preserved, along with the name.
-(defrecord-cached-schema Protocol [p]
-  -Protocol-spec
-  -Protocol-explain)
 
 ;; The cljs version is macros/protocol by necessity, since cljs `satisfies?` is a macro.
 #?(:clj
@@ -563,6 +566,10 @@
 
 ;;; maybe (nil)
 
+(defrecord-cached-schema Maybe [schema]
+  -Maybe-spec
+  -Maybe-explain)
+
 (let [nil-option (delay {:guard nil? :schema nil-schema})]
   (defn- -Maybe-spec [^Maybe this]
     (let [schema (.-schema this)]
@@ -575,9 +582,6 @@
   (let [schema (.-schema this)]
     (list 'maybe (explain schema))))
 
-(defrecord-cached-schema Maybe [schema]
-  -Maybe-spec
-  -Maybe-explain)
 
 (clojure.core/defn maybe
   "A value that must either be nil or satisfy schema"
@@ -587,6 +591,10 @@
         'Maybe -Maybe-spec -Maybe-explain)))
 
 ;;; named (schema elements)
+
+(defrecord-cached-schema NamedSchema [schema name]
+  -Named-spec
+  -Named-explain)
 
 (defn- -Named-spec [^NamedSchema this]
   (let [schema (.-schema this)
@@ -600,9 +608,6 @@
         name (.-name this)]
     (list 'named (explain schema) name)))
 
-(defrecord-cached-schema NamedSchema [schema name]
-  -Named-spec
-  -Named-explain)
 
 (clojure.core/defn named
   "A value that must satisfy schema, and has a name for documentation purposes."
@@ -613,6 +618,10 @@
 
 
 ;;; either (satisfies this schema or that one)
+
+(defrecord-cached-schema Either [schemas]
+  -Either-spec
+  -Either-explain)
 
 (defn- -Either-spec [^Either this]
   (let [schemas (.-schemas this)]
@@ -627,9 +636,6 @@
   (let [schemas (.-schemas this)]
     (cons 'either (map explain schemas))))
 
-(defrecord-cached-schema Either [schemas]
-  -Either-spec
-  -Either-explain)
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
   "A value that must satisfy at least one schema in schemas.
@@ -649,6 +655,10 @@
 
 ;;; conditional (choice of schema, based on predicates on the value)
 
+(defrecord-cached-schema ConditionalSchema [preds-and-schemas error-symbol]
+  -Conditional-spec
+  -Conditional-explain)
+
 (defn- -Conditional-spec [preds-and-schemas error-symbol]
   (variant/variant-spec
     spec/+no-precondition+
@@ -666,10 +676,6 @@
           (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
                   preds-and-schemas)
           (when error-symbol [error-symbol]))))
-
-(defrecord-cached-schema ConditionalSchema [preds-and-schemas error-symbol]
-  -Conditional-spec
-  -Conditional-explain)
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -724,6 +730,10 @@
   (precondition [this]
     (complement (.-pre ^schema.spec.collection.CollectionSpec this))))
 
+(defrecord-cached-schema CondPre [schemas]
+  -CondPre-spec
+  -CondPre-explain)
+
 (defn- -CondPre-spec [^CondPre this]
   (let [schemas (.-schemas this)]
     (variant/variant-spec
@@ -738,9 +748,6 @@
     (cons 'cond-pre
           (map explain schemas))))
 
-(defrecord-cached-schema CondPre [schemas]
-  -CondPre-spec
-  -CondPre-explain)
 
 (clojure.core/defn cond-pre
   "A replacement for `either` that constructs a conditional schema
@@ -767,6 +774,10 @@
 
 ;; constrained (post-condition on schema)
 
+(defrecord-cached-schema Constrained [schema postcondition post-name]
+  -Constrained-spec
+  -Constrained-explain)
+
 (defn- -Constrained-spec [^Constrained this]
   (let [schema (.-schema this)
         postcondition (.-postcondition this)
@@ -782,10 +793,6 @@
         post-name (.-post-name this)]
     (list 'constrained (explain schema) post-name)))
 
-(defrecord-cached-schema Constrained [schema postcondition post-name]
-  -Constrained-spec
-  -Constrained-explain)
-
 (clojure.core/defn constrained
   "A schema with an additional post-condition.  Differs from `conditional`
    with a single schema, in that the predicate checked *after* the main
@@ -800,12 +807,6 @@
            'Constrained -Constrained-spec -Constrained-explain))))
 
 ;;; both (satisfies this schema and that one)
-
-(defn- -Both-spec [this] this)
-
-(defn- -Both-explain [^Both this]
-  (let [schemas (.-schemas this)]
-    (cons 'both (map explain schemas))))
 
 (defrecord-cached-schema Both [schemas]
   -Both-spec
@@ -824,6 +825,13 @@
              tx
              (f (or tx x))))))
      (map #(spec/sub-checker {:schema %} params) (reverse schemas)))))
+
+(defn- -Both-spec [this] this)
+
+(defn- -Both-explain [^Both this]
+  (let [schemas (.-schemas this)]
+    (cons 'both (map explain schemas))))
+
 
 (clojure.core/defn ^{:deprecated "1.0.0"} both
   "A value that must satisfy every schema in schemas.
@@ -854,6 +862,10 @@
                     :cljs ns)
                  "/" name))))
 
+(defrecord-cached-schema Recursive [derefable]
+  -Recursive-spec
+  -Recursive-explain)
+
 (defn- -Recursive-spec [^Recursive this]
   (let [derefable (.-derefable this)]
     (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}])))
@@ -871,9 +883,6 @@
                :cljs
                '...)))))
 
-(defrecord-cached-schema Recursive [derefable]
-  -Recursive-spec
-  -Recursive-explain)
 
 (clojure.core/defn recursive
   "Support for (mutually) recursive schemas by passing a var that points to a schema,
@@ -894,6 +903,10 @@
   #?(:clj (instance? clojure.lang.Atom x)
      :cljs (satisfies? IAtom x)))
 
+(defrecord-cached-schema Atomic [schema]
+  -Atomic-spec
+  -Atomic-explain)
+
 (defn- -Atomic-spec [^Atomic this]
   (let [schema (.-schema this)]
     (collection/collection-spec
@@ -905,10 +918,6 @@
 (defn- -Atomic-explain [^Atomic this]
   (let [schema (.-schema this)]
     (list 'atom (explain schema))))
-
-(defrecord-cached-schema Atomic [schema]
-  -Atomic-spec
-  -Atomic-explain)
 
 (clojure.core/defn atom
   "An atom containing a value matching 'schema'."
@@ -979,6 +988,11 @@
   #?(:clj (clojure.lang.MapEntry. k v)
      :cljs (cljs.core.MapEntry. k v nil)))
 
+;; A schema for a single map entry.
+(defrecord-cached-schema MapEntry [key-schema val-schema]
+  -MapEntry-spec
+  -MapEntry-explain)
+
 (defn- -MapEntry-spec [^MapEntry this]
   (let [key-schema (.-key-schema this)
         val-schema (.-val-schema this)]
@@ -996,11 +1010,6 @@
   (let [key-schema (.-key-schema this)
         val-schema (.-val-schema this)]
     (list 'map-entry (explain key-schema) (explain val-schema))))
-
-;; A schema for a single map entry.
-(defrecord-cached-schema MapEntry [key-schema val-schema]
-  -MapEntry-spec
-  -MapEntry-explain)
 
 (clojure.core/defn map-entry [key-schema val-schema]
   (-> (MapEntry. key-schema val-schema)
@@ -1153,6 +1162,10 @@
       :cljs cljs.core/PersistentQueue.EMPTY)
    col))
 
+(defrecord-cached-schema Queue [schema]
+  -Queue-spec
+  -Queue-explain)
+
 (defn- -Queue-spec [^Queue this]
   (let [schema (.-schema this)]
     (collection/collection-spec
@@ -1165,9 +1178,6 @@
   (let [schema (.-schema this)]
     (list 'queue (explain schema))))
 
-(defrecord-cached-schema Queue [schema]
-  -Queue-spec
-  -Queue-explain)
 
 (clojure.core/defn queue
   "Defines a schema satisfied by instances of clojure.lang.PersistentQueue
@@ -1302,6 +1312,10 @@
 ;; also satisfy a map schema.  An optional :extra-validator-fn can also be attached to do
 ;; additional validation.
 
+(defrecord-cached-schema Record [klass schema]
+  -Record-spec
+  -Record-explain)
+
 (defn- -Record-spec [^Record this]
   (let [klass (.-klass this)
         schema (.-schema this)]
@@ -1322,10 +1336,6 @@
                               (symbol (.getName ^Class klass)))
                      :cljs (symbol (pr-str klass)))
           (explain schema))))
-
-(defrecord-cached-schema Record [klass schema]
-  -Record-spec
-  -Record-explain)
 
 (clojure.core/defn record* [klass schema map-constructor]
   #?(:clj (macros/assert! (or (class? klass) #?(:bb (instance? sci.lang.Type klass))) "Expected record class, got %s" (utils/type-of klass)))
@@ -1370,20 +1380,20 @@
             (when (seq more)
               ['& (mapv explain more)]))))
 
+(defrecord-cached-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
+  -Fn-spec
+  -Fn-explain)
+
 (defn- -Fn-spec [this]
   (leaf/leaf-spec (spec/simple-precondition this ifn?)
                   ifn?))
 
 (defn- -Fn-explain [^FnSchema this]
   (let [output-schema (.-output-schema this)
-        input-schemas (.-input-schema this)]
+        input-schemas (.-input-schemas this)]
     (if (> (count input-schemas) 1)
       (list* '=>* (explain output-schema) (map explain-input-schema input-schemas))
       (list* '=> (explain output-schema) (explain-input-schema (first input-schemas))))))
-
-(defrecord-cached-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
-  -Fn-spec
-  -Fn-explain)
 
 (clojure.core/defn- arity [input-schema]
   (if (seq input-schema)
