@@ -1153,8 +1153,10 @@
    that also precomputes parts of the Schema for performance.
 
    The name of the schema is recorded in the metadata. If metadata is not supported on
-   the schema, will be wrapped in a Schema in order to attach the metadata. The wrapper
-   implements SchemaSyntax to recover the wrapped value."
+   the schema, will be wrapped in a Schema in order to attach the metadata.
+ 
+   TODO:
+   The wrapper implements a protocol to recover the wrapped value."
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
