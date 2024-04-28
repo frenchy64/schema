@@ -811,7 +811,8 @@
 (defn- -Both-spec [this] this)
 
 (defn- -Both-explain [^Both this]
-  (cons 'both (map explain schemas)))
+  (let [schemas (.-schemas this)]
+    (cons 'both (map explain schemas))))
 
 (defrecord-cached-schema Both [schemas]
   -Both-spec
@@ -860,10 +861,12 @@
                     :cljs ns)
                  "/" name))))
 
-(macros/defrecord-schema Recursive [derefable]
-  Schema
-  (spec [this] (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}]))
-  (explain [this]
+(defn- -Recursive-spec [^Recursive this]
+  (let [derefable (.-derefable this)]
+    (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}])))
+
+(defn- -Recursive-explain [^Recursive this]
+  (let [derefable (.-derefable this)]
     (list 'recursive
           (if #?(:clj (var? derefable)
                  :cljs (instance? Var derefable))
@@ -875,6 +878,10 @@
                :cljs
                '...)))))
 
+(defrecord-cached-schema Recursive [derefable]
+  -Recursive-spec
+  -Recursive-explain)
+
 (clojure.core/defn recursive
   "Support for (mutually) recursive schemas by passing a var that points to a schema,
    e.g (recursive #'ExampleRecursiveSchema)."
@@ -882,7 +889,9 @@
   (macros/assert! #?(:clj (instance? clojure.lang.IDeref schema)
                      :cljs (satisfies? IDeref schema))
                   "Not an IDeref: %s" schema)
-  (Recursive. schema))
+  (-> (Recursive. schema)
+      (-construct-cached-schema-record
+        'Recursive -Recursive-spec -Recursive-explain)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
