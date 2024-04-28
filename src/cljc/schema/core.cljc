@@ -617,23 +617,22 @@
 
 ;;; either (satisfies this schema or that one)
 
-(defn- -Either-spec [schemas]
-  (variant/variant-spec
-    spec/+no-precondition+
-    (for [s schemas]
-      {:guard (complement (checker s)) ;; since the guard determines which option we check against
-       :schema s})
-    #(list 'some-matching-either-clause? %)))
+(defn- -Either-spec [^Either this]
+  (let [schemas (.-schemas this)]
+    (variant/variant-spec
+      spec/+no-precondition+
+      (for [s schemas]
+        {:guard (complement (checker s)) ;; since the guard determines which option we check against
+         :schema s})
+      #(list 'some-matching-either-clause? %))))
 
-(defn- -Either-explain [schemas]
-  (cons 'either (map explain schemas)))
+(defn- -Either-explain [^Either this]
+  (let [schemas (.-schemas this)]
+    (cons 'either (map explain schemas))))
 
-(macros/defrecord-schema Either [schemas]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-Either-spec schemas)))
-  (explain [this] (or (force (::explain this))
-                      (-Either-explain schemas))))
+(defrecord-cached-schema Either [schemas]
+  -Either-spec
+  -Either-explain)
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
   "A value that must satisfy at least one schema in schemas.
@@ -646,10 +645,9 @@
    instead; they are more efficient, provide better error messages,
    and work with coercion."
   [& schemas]
-  (let [this (Either. schemas)]
-    (assoc this
-           ::spec (delay (-Either-spec schemas))
-           ::explain (delay (-Either-explain schemas)))))
+  (-> (Either. schemas)
+      (-construct-cached-schema-record
+        'Either -Either-spec -Either-explain)))
 
 
 ;;; conditional (choice of schema, based on predicates on the value)
