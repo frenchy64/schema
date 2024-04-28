@@ -567,54 +567,52 @@
 ;;; maybe (nil)
 
 (let [nil-option (delay {:guard nil? :schema nil-schema})]
-  (defn- -Maybe-spec [schema]
-    (variant/variant-spec
-      spec/+no-precondition+
-      [@nil-option
-       {:schema schema}])))
+  (defn- -Maybe-spec [^Maybe this]
+    (let [schema (.-schema this)]
+      (variant/variant-spec
+        spec/+no-precondition+
+        [@nil-option
+         {:schema schema}]))))
 
-(defn- -Maybe-explain [schema]
-  (list 'maybe (explain schema)))
+(defn- -Maybe-explain [^Maybe this]
+  (let [schema (.-schema this)]
+    (list 'maybe (explain schema))))
 
-(macros/defrecord-schema Maybe [schema]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-Maybe-spec schema)))
-  (explain [this] (or (force (::explain this))
-                      (-Maybe-explain schema))))
+(defrecord-cached-schema Maybe [schema]
+  -Maybe-spec
+  -Maybe-explain)
 
 (clojure.core/defn maybe
   "A value that must either be nil or satisfy schema"
   [schema]
-  (let [this (Maybe. schema)]
-    (assoc this
-           ::spec (delay (-Maybe-spec schema))
-           ::explain (delay (-Maybe-explain schema)))))
+  (-> (Maybe. schema)
+      (-construct-cached-schema-record
+        'Maybe -Maybe-spec -Maybe-explain)))
 
 ;;; named (schema elements)
 
-(defn- -Named-spec [schema name]
-  (variant/variant-spec
-    spec/+no-precondition+
-    [{:schema schema :wrap-error #(utils/->NamedError name %)}]))
+(defn- -Named-spec [^NamedSchema this]
+  (let [schema (.-schema this)
+        name (.-name this)]
+    (variant/variant-spec
+      spec/+no-precondition+
+      [{:schema schema :wrap-error #(utils/->NamedError name %)}])))
 
-(defn- -Named-explain [schema name]
-  (list 'named (explain schema) name))
+(defn- -Named-explain [^NamedSchema this]
+  (let [schema (.-schema this)
+        name (.-name this)]
+    (list 'named (explain schema) name)))
 
-(macros/defrecord-schema NamedSchema [schema name]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-Named-spec schema name)))
-  (explain [this] (or (force (::explain this))
-                      (-Named-explain schema name))))
+(defrecord-cached-schema NamedSchema [schema name]
+  -Named-spec
+  -Named-explain)
 
 (clojure.core/defn named
   "A value that must satisfy schema, and has a name for documentation purposes."
   [schema name]
-  (let [this (NamedSchema. schema name)]
-    (assoc this
-           ::spec (delay (-Named-spec schema name))
-           ::explain (delay (-Named-explain schema name)))))
+  (-> (NamedSchema. schema name)
+      (-construct-cached-schema-record
+        'NamedSchema -Named-spec -Named-explain)))
 
 
 ;;; either (satisfies this schema or that one)
