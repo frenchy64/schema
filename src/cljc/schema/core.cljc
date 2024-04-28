@@ -731,31 +731,23 @@
   (precondition [this]
     (spec/pre-pred this nil)))
 
-(macros/defrecord-schema CondPre [schemas]
-  Schema
-  (spec [this]
+(defn- -CondPre-spec [^CondPre this]
+  (let [schemas (.-schemas this)]
     (variant/variant-spec
-     {:pre spec/+no-precondition+
-      :options
+      spec/+no-precondition+
       (for [s schemas]
         {:guard (precondition (spec s))
          :schema s})
-      :err-f
-      #(list 'matches-some-precondition? %)
-      :parent this
-      :params->pred #(reduce (cc/fn [f s]
-                               (let [pred (spec/pred (spec s) %)]
-                                 (cc/fn [x]
-                                   (or (pred x) (f x)))))
-                             never? (rseq schemas))
-      :params->pre-pred #(reduce (cc/fn [f s]
-                                   (let [pre-pred (spec/pre-pred f %)]
-                                     (cc/fn [x]
-                                       (or (pre-pred x) (f x)))))
-                                 never? (rseq schemas))}))
-  (explain [this]
+      #(list 'matches-some-precondition? %))))
+
+(defn- -CondPre-explain [^CondPre this]
+  (let [schemas (.-schemas this)]
     (cons 'cond-pre
           (map explain schemas))))
+
+(defrecord-cached-schema CondPre [schemas]
+  -CondPre-spec
+  -CondPre-explain)
 
 (clojure.core/defn cond-pre
   "A replacement for `either` that constructs a conditional schema
@@ -775,7 +767,10 @@
 
    EXPERIMENTAL"
   [& schemas]
-  (CondPre. (vec schemas)))
+  (-> (CondPre. schemas)
+      (-construct-cached-schema-record
+        -CondPre-spec
+        -CondPre-explain)))
 
 ;; constrained (post-condition on schema)
 
