@@ -442,17 +442,22 @@
 (clojure.core/defn protocol-name [protocol]
   (-> protocol meta :proto-sym))
 
+(defn- -Protocol-spec [^Protocol this]
+  (let [p (.-p this)]
+    (leaf/leaf-spec
+      (spec/precondition
+        this
+        (:proto-pred (meta this))
+        #(list 'satisfies? (protocol-name this) %)))))
+
+(defn- -Protocol-explain [this]
+  (list 'protocol (protocol-name this)))
+
 ;; In cljs, satisfies? is a macro so we must precompile (partial satisfies? p)
 ;; and put it in metadata of the record so that equality is preserved, along with the name.
-(macros/defrecord-schema Protocol [p]
-  Schema
-  (spec [this]
-    (leaf/leaf-spec
-     (spec/precondition
-      this
-      (:proto-pred (meta this))
-      #(list 'satisfies? (protocol-name this) %))))
-  (explain [this] (list 'protocol (protocol-name this))))
+(defrecord-cached-schema Protocol [p]
+  -Protocol-spec
+  -Protocol-explain)
 
 ;; The cljs version is macros/protocol by necessity, since cljs `satisfies?` is a macro.
 #?(:clj
@@ -465,9 +470,11 @@
 
    A macro for cljs sake, since `satisfies?` is a macro in cljs."
   [p]
-  `(with-meta (->Protocol ~p)
-     {:proto-pred #(satisfies? ~p %)
-      :proto-sym '~p})))
+  `(-> (with-meta (->Protocol ~p)
+                  {:proto-pred #(satisfies? ~p %)
+                   :proto-sym '~p})
+       (-construct-cached-schema-record
+         '~'Protocol -Protocol-spec -Protocol-explain))))
 
 
 ;;; regex (validates matching Strings)
