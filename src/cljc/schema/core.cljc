@@ -277,6 +277,10 @@
               (cc/fn [this']
                 (when (identical? this this')
                   @d)))
+          ;; we use mutable maps so we can always update the cache
+          ;; on a cache-miss. if a library creates a spec using the position
+          ;; ctor, we then don't need to care if they initialize a cache field,
+          ;; which also helps ensure backwards compatibility.
           _ #?(:clj (let [^java.util.Map weak (field->Map field)]
                       (.put weak this f)
                       f)
