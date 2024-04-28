@@ -597,5 +597,33 @@
   [on?]
   (reset! *compile-fn-validation* on?))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Cached fields
+
 (defmacro soft-delay [& body]
   `(utils/soft-delay* #(do ~@body)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Helpers to create cached fields in records
+
+(defmacro ^:internal defrecord-cached-schema
+  [n fs this->spec this->explain & args]
+  (assert (symbol? this->spec))
+  (assert (symbol? this->explain))
+  `(do (declare ~this->spec ~this->explain)
+       (defrecord-schema ~n ~fs
+         schema.core/Schema
+         (~'spec [this#] (utils/-get-cached-record-field this# '~n :spec ~this->spec))
+         (~'explain [this#] (utils/-get-cached-record-field this# '~n :explain ~this->explain))
+         ~@args)))
+
+(defmacro ^:internal defrecord-cached-spec
+  [n fs this->subschemas this+params->checker & args]
+  (assert (symbol? this->subschemas))
+  (assert (symbol? this+params->checker))
+  `(do (declare ~this->subschemas ~this+params->checker)
+       (defrecord-schema ~n ~fs
+         schema.spec.core/CoreSpec
+         (~'subschemas [this#] (utils/-get-cached-record-field this# '~n :subschemas ~this->subschemas))
+         (~'checker [this# params#] (utils/-get-cached-record-field [this# params#] '~n :checker #(~this+params->checker (nth % 0) (nth % 1))))
+         ~@args)))

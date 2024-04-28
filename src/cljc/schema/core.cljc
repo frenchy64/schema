@@ -269,63 +269,6 @@
   (extend-primitive bytes (Class/forName "[B"))
   (extend-primitive booleans (Class/forName "[Z"))))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Helpers to create cached fields in Schema records
-
-;; this gives us something similar to deftype's mutable fields or reify's closures,
-;; without having to change our public-facing API.
-;; in schema.core to keep all defn's private even though we provide a macro
-
-(let #?(:clj [field->Map (let [+cached-record-specs+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))
-                               +cached-record-explains+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
-                           #(case %
-                              :spec +cached-record-specs+
-                              :explain +cached-record-explains+))]
-        :cljs [->id (cc/fn [cls-name field]
-                      (str "schema$core$" cls-name "$" (name field)))])
-  (defn- -set-cached-record-field-fn [this cls-name field this->v]
-    (let [f (let [d (soft-delay (this->v this))]
-              (cc/fn [this']
-                (when (identical? this this')
-                  (assert d)
-                  @d)))
-          ;; we use mutable maps so we can always update the cache
-          ;; on a cache-miss. if a library creates a spec using the position
-          ;; ctor, we then don't need to care if they initialize a cache field,
-          ;; which also helps ensure backwards compatibility.
-          _ #?(:clj (let [^java.util.Map weak (field->Map field)]
-                      (.put weak this f)
-                      f)
-               :cljs (gobject/set this (->id cls-name field) f))]
-      f))
-
-  (defn- -get-cached-record-field [this cls-name field this->v]
-    (or (when-some [f #?(:clj (let [^java.util.Map weak (field->Map field)]
-                                (.get weak this))
-                         :cljs (gobject/get this (->id cls-name field)))]
-          (f this))
-        ((-set-cached-record-field-fn
-           this cls-name field this->v)
-         this))))
-
-#?(:clj
-   (defmacro ^:private defrecord-cached-schema
-     [n fs this->spec this->explain & args]
-     (assert (symbol? this->spec))
-     (assert (symbol? this->explain))
-     `(do (declare ~this->spec ~this->explain)
-          (macros/defrecord-schema ~n ~fs
-            Schema
-            (~'spec [this#] (-get-cached-record-field this# '~n :spec ~this->spec))
-            (~'explain [this#] (-get-cached-record-field this# '~n :explain ~this->explain))
-            ~@args))))
-
-(defn- -construct-cached-schema-record [this cls-name this->spec this->explain]
-  (assert (symbol? cls-name))
-  (doto this
-    (-set-cached-record-field-fn cls-name :spec this->spec)
-    (-set-cached-record-field-fn cls-name :explain this->explain)))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Cross-platform Schema leaves

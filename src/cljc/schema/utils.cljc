@@ -224,6 +224,9 @@
      :clj (java.util.concurrent.atomic.AtomicReference. false)
      :cljs (atom false)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Cached fields
+
 (defn soft-delay* [f]
   #?(:clj (let [v (volatile! nil)]
             (reify
@@ -238,3 +241,48 @@
              cljs.core/IDeref
              ;;TODO WeakRef? https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakRef
              (-deref [_] (f)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Helpers to create cached fields in Schema records
+
+;; this gives us something similar to deftype's mutable fields or reify's closures,
+;; without having to change our public-facing API.
+;; in schema.core to keep all defn's private even though we provide a macro
+
+(let #?(:clj [field->Map (let [+cached-record-specs+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))
+                               +cached-record-explains+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+                           #(case %
+                              :spec +cached-record-specs+
+                              :explain +cached-record-explains+))]
+        :cljs [->id (cc/fn [cls-name field]
+                      (str "schema$core$" cls-name "$" (name field)))])
+  (defn ^:internal -set-cached-record-field-fn [this cls-name field this->v]
+    (let [f (let [d (soft-delay (this->v this))]
+              (cc/fn [this']
+                (when (identical? this this')
+                  (assert d)
+                  @d)))
+          ;; we use mutable maps so we can always update the cache
+          ;; on a cache-miss. if a library creates a spec using the position
+          ;; ctor, we then don't need to care if they initialize a cache field,
+          ;; which also helps ensure backwards compatibility.
+          _ #?(:clj (let [^java.util.Map weak (field->Map field)]
+                      (.put weak this f)
+                      f)
+               :cljs (gobject/set this (->id cls-name field) f))]
+      f))
+
+  (defn ^:internal -get-cached-record-field [this cls-name field this->v]
+    (or (when-some [f #?(:clj (let [^java.util.Map weak (field->Map field)]
+                                (.get weak this))
+                         :cljs (gobject/get this (->id cls-name field)))]
+          (f this))
+        ((-set-cached-record-field-fn
+           this cls-name field this->v)
+         this))))
+
+(defn ^:internal -construct-cached-schema-record [this cls-name this->spec this->explain]
+  (assert (symbol? cls-name))
+  (doto this
+    (-set-cached-record-field-fn cls-name :spec this->spec)
+    (-set-cached-record-field-fn cls-name :explain this->explain)))
