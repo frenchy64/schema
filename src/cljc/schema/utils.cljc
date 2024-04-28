@@ -257,8 +257,8 @@
         :cljs [->id (cc/fn [cls-name field]
                       (str "schema$core$" cls-name "$" (name field)))])
   (defn ^:internal -set-cached-record-field-fn [this cls-name field this->v]
-    (let [f (let [d (soft-delay (this->v this))]
-              (cc/fn [this']
+    (let [f (let [d (soft-delay* #(this->v this))]
+              (fn [this']
                 (when (identical? this this')
                   (assert d)
                   @d)))

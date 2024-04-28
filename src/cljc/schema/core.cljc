@@ -79,16 +79,16 @@
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
-   #?(:clj [schema.macros :as macros :refer [soft-delay]])
+   #?(:clj [schema.macros :as macros :refer [defrecord-cached-schema soft-delay]])
    #?(:cljs [goog.object :as gobject])
    [schema.protocols :as prot]
-   [schema.utils :as utils]
+   [schema.utils :as utils :refer [-construct-cached-schema-record]]
    [schema.spec.core :as spec :include-macros true]
    [schema.spec.leaf :as leaf]
    [schema.spec.variant :as variant]
    [schema.spec.collection :as collection]
    [clojure.core :as cc])
-  #?(:cljs (:require-macros [schema.macros :as macros :refer [soft-delay]]
+  #?(:cljs (:require-macros [schema.macros :as macros :refer [defrecord-cached-schema soft-delay]]
                             [schema.core :refer [defrecord-cached-schema]])))
 
 #?(:clj (set! *warn-on-reflection* true))
