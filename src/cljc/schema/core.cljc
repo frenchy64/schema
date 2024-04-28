@@ -670,12 +670,9 @@
                   preds-and-schemas)
           (when error-symbol [error-symbol]))))
 
-(macros/defrecord-schema ConditionalSchema [preds-and-schemas error-symbol]
-  Schema
-  (spec [this] (or (force (::spec this))
-                   (-Conditional-spec preds-and-schemas error-symbol)))
-  (explain [this] (or (force (::explain this))
-                      (-Conditional-explain preds-and-schemas error-symbol))))
+(defrecord-cached-schema ConditionalSchema [preds-and-schemas error-symbol]
+  -Conditional-spec
+  -Conditional-explain)
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -694,15 +691,13 @@
             (symbol? (last preds-and-schemas))))
    "Expected even, nonzero number of args (with optional trailing symbol); got %s"
    (count preds-and-schemas))
-  (let [preds-and-schemas (vec
+  (-> (ConditionalSchema. (vec
                             (for [[pred schema] (partition 2 preds-and-schemas)]
                               (do (macros/assert! (ifn? pred) (str "Conditional predicate " pred " must be a function"))
                                   [(if (= pred :else) (constantly true) pred) schema])))
-        error-symbol (if (odd? (count preds-and-schemas)) (last preds-and-schemas))
-        this (ConditionalSchema. preds-and-schemas error-symbol)]
-    (assoc this
-           ::spec (delay (-Conditional-explain preds-and-schemas error-symbol)))
-    ))
+                          (if (odd? (count preds-and-schemas)) (last preds-and-schemas)))
+      (-construct-cached-schema-record
+        'Conditional -Conditional-spec -Conditional-explain)))
 
 
 ;; cond-pre (conditional based on surface type)
