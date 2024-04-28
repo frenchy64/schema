@@ -596,3 +596,6 @@
    See (doc compile-fn-validation?) for all conditions which control fn validation compilation"
   [on?]
   (reset! *compile-fn-validation* on?))
+
+(defmacro defprotocol-once [n & args]
+  )

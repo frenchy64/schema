@@ -80,6 +80,7 @@
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
    #?(:clj [schema.macros :as macros])
+   [schema.protocols :as prot]
    [schema.utils :as utils]
    [schema.spec.core :as spec :include-macros true]
    [schema.spec.leaf :as leaf]
@@ -87,28 +88,29 @@
    [schema.spec.collection :as collection]
    [clojure.core :as cc])
   #?(:cljs (:require-macros [schema.macros :as macros]
-                            schema.core)))
+                            [schema.core :refer [defrecord-cached-schema]])))
 
 #?(:clj (set! *warn-on-reflection* true))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Schema protocol
 
-(clojure.core/defprotocol Schema
-  (spec [this]
-    "A spec is a record of some type that expresses the structure of this schema
-     in a declarative and/or imperative way.  See schema.spec.* for examples.")
-  (explain [this]
-    "Expand this schema to a human-readable format suitable for pprinting,
-     also expanding class schematas at the leaves.  Example:
+(when #?(:clj (let [v (resolve 'Schema)]
+                (or (not (var? v))
+                    (not (some-> v deref map?))))
+         :cljs true)
+  (clojure.core/defprotocol Schema
+    (spec [this]
+      "A spec is a record of some type that expresses the structure of this schema
+       in a declarative and/or imperative way.  See schema.spec.* for examples.")
+    (explain [this]
+      "Expand this schema to a human-readable format suitable for pprinting,
+       also expanding class schematas at the leaves.  Example:
 
-     user> (s/explain {:a s/Keyword :b [s/Int]} )
-     {:a Keyword, :b [Int]}"))
+       user> (s/explain {:a s/Keyword :b [s/Int]} )
+       {:a Keyword, :b [Int]}")))
 
-(clojure.core/defprotocol SchemaSyntax
-  (original-syntax [this] "Returns the original syntax for a schema. Returns this if none."))
-
-(extend-protocol SchemaSyntax
+(extend-protocol prot/SchemaSyntax
   nil
   (original-syntax [_] nil)
   #?(:clj Object :cljs default)
@@ -220,7 +222,7 @@
         (let [sp (delay (-class-spec this))
               expl (delay (-class-explain this))]
           (reify
-            SchemaSyntax
+            prot/SchemaSyntax
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
@@ -509,7 +511,7 @@
                      #?(:clj (symbol (str "#\"" this "\""))
                         :cljs (symbol (str "#\"" (.slice (str this) 1 -1) "\""))))]
           (reify
-            SchemaSyntax
+            prot/SchemaSyntax
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
@@ -727,11 +729,15 @@
 
 ;; cond-pre (conditional based on surface type)
 
-(clojure.core/defprotocol HasPrecondition
-  (precondition [this]
-    "Return a predicate representing the Precondition for this schema:
-     the predicate returns true if the precondition is satisfied.
-     (See spec.core for more details)"))
+(when #?(:clj (let [v (resolve 'HasPrecondition)]
+                (or (not (var? v))
+                    (not (some-> v deref map?))))
+         :cljs true)
+  (clojure.core/defprotocol HasPrecondition
+    (precondition [this]
+      "Return a predicate representing the Precondition for this schema:
+       the predicate returns true if the precondition is satisfied.
+       (See spec.core for more details)")))
 
 (extend-protocol HasPrecondition
   schema.spec.leaf.LeafSpec
@@ -1111,7 +1117,7 @@
         (let [sp (delay (map-spec this))
               expl (delay (map-explain this))]
           (reify
-            SchemaSyntax
+            prot/SchemaSyntax
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
@@ -1145,7 +1151,7 @@
                          (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))))
                   expl (delay #{(explain (first this))})]
               (reify
-                SchemaSyntax
+                prot/SchemaSyntax
                 (original-syntax [_] this)
                 Schema
                 (spec [_] @sp)
@@ -1299,7 +1305,7 @@
         (let [sp (delay (-sequence-spec this))
               expl (delay (-sequence-explain this))]
           (reify
-            SchemaSyntax
+            prot/SchemaSyntax
             (original-syntax [_] this)
             Schema
             (spec [_] @sp)
@@ -1468,24 +1474,26 @@
   (-> schema meta :ns))
 
 (cc/defn ^:internal -defschema [{s :schema :keys [name nsym]}]
+  (prn "-defschema")
   (let [name-schema #(vary-meta
                        (schema-with-name % name)
                        assoc :ns nsym)]
     (name-schema
       (if #?(:clj (instance? clojure.lang.IObj s)
              :cljs (satisfies? IWithMeta schema))
-        (name-schema s)
+        s
         (or (utils/get-syntax-schema s)
             (utils/declare-syntax-schema!
               s
-              (let [sp (delay (spec s))
-                    expl (delay (explain s))]
+              (let [;; these must be eager to avoid infinite loops
+                    sp (spec s)
+                    expl (explain s)]
                 (reify
-                  SchemaSyntax
+                  prot/SchemaSyntax
                   (original-syntax [_] s)
                   Schema
-                  (spec [_] @sp)
-                  (explain [_] @expl)))))))))
+                  (spec [_] sp)
+                  (explain [_] expl)))))))))
 
 #?(:clj
 (defmacro defschema
@@ -1932,3 +1940,16 @@
   "Sets the maximum length of value to be output before it is contracted to a prettier name."
   [max-length]
   (reset! utils/max-value-length max-length))
+
+(comment
+  (defschema Foo Integer)
+  (defschema Bar (nth (iterate #(vector #{%}) Integer) 1000))
+  (time (spec Foo))
+  (time (do (spec Bar) nil))
+  (time (do (nth (iterate #(vector #{%}) Integer) 1000) nil))
+  (class Foo)
+  (time (dotimes [_ 1000]
+          (spec Integer)))
+  (time (dotimes [_ 1000]
+          (spec [Foo])))
+  )
