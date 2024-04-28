@@ -1591,3 +1591,31 @@
   "Sets the maximum length of value to be output before it is contracted to a prettier name."
   [max-length]
   (reset! utils/max-value-length max-length))
+
+(comment
+(defschema Bar (nth (iterate #(vector #{%}) Integer) 100))
+(dotimes [_ 10]
+  (time (spec Bar)))
+;="Elapsed time: 0.926795 msecs"
+;="Elapsed time: 0.055069 msecs"
+;="Elapsed time: 0.02755 msecs"
+;="Elapsed time: 0.02287 msecs"
+;="Elapsed time: 0.018021 msecs"
+;="Elapsed time: 0.020887 msecs"
+;="Elapsed time: 0.023733 msecs"
+;="Elapsed time: 0.02642 msecs"
+;="Elapsed time: 0.022624 msecs"
+;="Elapsed time: 0.034662 msecs"
+(dotimes [_ 10]
+  (time (spec (nth (iterate #(vector #{%}) Integer) 100))))
+;="Elapsed time: 0.298001 msecs"
+;="Elapsed time: 0.171665 msecs"
+;="Elapsed time: 0.231007 msecs"
+;="Elapsed time: 0.324284 msecs"
+;="Elapsed time: 0.105173 msecs"
+;="Elapsed time: 0.083637 msecs"
+;="Elapsed time: 0.090645 msecs"
+;="Elapsed time: 0.087503 msecs"
+;="Elapsed time: 0.098164 msecs"
+;="Elapsed time: 0.06527 msecs"
+  )
