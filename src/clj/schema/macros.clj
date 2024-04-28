@@ -3,8 +3,7 @@
   (:refer-clojure :exclude [simple-symbol?])
   (:require
    [clojure.string :as str]
-   [schema.utils :as utils]
-   [clojure.walk :as walk]))
+   [schema.utils :as utils]))
 
 ;; can remove this once we drop Clojure 1.8 support
 (defn- simple-symbol? [x]
