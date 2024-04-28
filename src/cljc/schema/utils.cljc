@@ -189,7 +189,8 @@
 #?(:cljs
 (do
   (defn declare-syntax-schema! [id syntax-schema]
-    (gobject/set id "schema$utils$syntax_schema" syntax-schema))
+    (gobject/set id "schema$utils$syntax_schema" syntax-schema)
+    syntax-schema)
 
   (defn get-syntax-schema [id]
     (gobject/get id "schema$utils$syntax_schema"))))
@@ -199,18 +200,31 @@
 
 #?(:clj
    (let [class->pred (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
-     (defn register-class-pred!
-       "Only register a pred at runtime, not during macroexpansion.
-       This is so we can reduce generated code by checking if we've
-       already registered the predicate in a way that's already compatible
-       with AOT-compilation."
-       [cls pred]
+     (defn register-class-pred! [cls pred]
        (when (class? cls)
          (.put class->pred cls pred))
        pred)
      (defn get-class-pred [cls]
        (or (.get class->pred cls)
            (register-class-pred! cls (eval `#(instance? ~cls %)))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for precomputed checkers
+
+#?(:clj
+   (let [schema->checker (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+     (defn register-schema-checker! [s checker]
+       (.put schema->checker s checker)
+       checker)
+     (defn get-schema-checker [s]
+       (.get schema->checker s)))
+   :cljs 
+   (do
+     (defn register-schema-checker! [s checker]
+       (gobject/set id "schema$core$checker" checker)
+       checker)
+     (defn get-schema-checker [s]
+       (gobject/get s "schema$core$checker"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Utilities for fast-as-possible reference to use to turn fn schema validation on/off

@@ -135,11 +135,16 @@
 
 (clojure.core/defn checker
   "Compile an efficient checker for schema, which returns nil for valid values and
-   error descriptions otherwise."
+  error descriptions otherwise."
   [schema]
-  (comp utils/error-val
-        (spec/run-checker
-         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)))
+  (or (utils/get-schema-checker schema)
+      (let [->checker #(spec/run-checker-info
+                         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)
+            {:keys [checker recursive]} (->checker)
+            checker+unwrap (comp utils/error-val checker)]
+        (when-not recursive
+          (utils/register-schema-checker! schema checker+unwrap))
+        checker+unwrap)))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
