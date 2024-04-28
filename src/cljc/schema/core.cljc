@@ -1309,40 +1309,37 @@
 ;; also satisfy a map schema.  An optional :extra-validator-fn can also be attached to do
 ;; additional validation.
 
-(macros/defrecord-schema Record [klass schema]
-  Schema
-  (spec [{:keys [extra-validator-fn] :as this}]
-    (let [pre-pred (instance-pred klass)]
-      (collection/collection-spec
-        {:pre
-         (let [pre (spec/precondition this pre-pred #(list 'instance? klass %))]
-           (if-some [extra (when extra-validator-fn
-                             (spec/precondition this extra-validator-fn #(list 'passes-extra-validation? %)))]
-             #(or (pre %) (extra %))
-             pre))
-         :konstructor
-         (:konstructor (meta this))
-         :options
-         (map-elements schema)
-         :on-error
-         (map-error)
-         :parent this
-         :params->pred (cc/fn [_]
-                         (if extra-validator-fn
-                           #(and (pre-pred %) (extra-validator-fn %))
-                           pre-pred))
-         :params->pre-pred (cc/fn [_] pre-pred)})))
-  (explain [this]
+(defn- -Record-spec [^Record this]
+  (let [klass (.-klass this)
+        schema (.-schema this)]
+    (collection/collection-spec
+      (let [p (spec/precondition this #(instance? klass %) #(list 'instance? klass %))]
+        (if-let [evf (:extra-validator-fn this)]
+          (some-fn p (spec/precondition this evf #(list 'passes-extra-validation? %)))
+          p))
+      (:konstructor (meta this))
+      (map-elements schema)
+      (map-error))))
+
+(defn- -Record-explain [^Record this]
+  (let [klass (.-klass this)
+        schema (.-schema this)]
     (list 'record #?(:clj (or #?(:bb (when (instance? sci.lang.Type klass)
                                        (symbol (str klass))))
                               (symbol (.getName ^Class klass)))
                      :cljs (symbol (pr-str klass)))
           (explain schema))))
 
+(defrecord-cached-schema Record [klass schema]
+  -Record-spec
+  -Record-explain)
+
 (clojure.core/defn record* [klass schema map-constructor]
   #?(:clj (macros/assert! (or (class? klass) #?(:bb (instance? sci.lang.Type klass))) "Expected record class, got %s" (utils/type-of klass)))
   (macros/assert! (map? schema) "Expected map, got %s" (utils/type-of schema))
-  (with-meta (Record. klass schema) {:konstructor map-constructor}))
+  (-> (with-meta (Record. klass schema) {:konstructor map-constructor})
+      (-construct-cached-schema-record
+        'Record -Record-spec -Recursive-explain)))
 
 #?(:clj
 (defmacro record
@@ -1380,14 +1377,20 @@
             (when (seq more)
               ['& (mapv explain more)]))))
 
-(macros/defrecord-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/simple-precondition this ifn?)
-                               ifn?))
-  (explain [this]
+(defn- -Fn-spec [this]
+  (leaf/leaf-spec (spec/simple-precondition this ifn?)
+                  ifn?))
+
+(defn- -Fn-explain [^FnSchema this]
+  (let [output-schema (.-output-schema this)
+        input-schemas (.-input-schema this)]
     (if (> (count input-schemas) 1)
       (list* '=>* (explain output-schema) (map explain-input-schema input-schemas))
       (list* '=> (explain output-schema) (explain-input-schema (first input-schemas))))))
+
+(defrecord-cached-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
+  -Fn-spec
+  -Fn-explain)
 
 (clojure.core/defn- arity [input-schema]
   (if (seq input-schema)
@@ -1406,7 +1409,10 @@
   (macros/assert! (seq input-schemas) "Function must have at least one input schema")
   (macros/assert! (every? vector? input-schemas) "Each arity must be a vector.")
   (macros/assert! (apply distinct? (map arity input-schemas)) "Arities must be distinct")
-  (FnSchema. output-schema (sort-by arity input-schemas)))
+  (-> (FnSchema. output-schema (sort-by arity input-schemas))
+      (-construct-cached-schema-record
+        -Fn-spec
+        -Fn-explain)))
 
 #?(:clj
 (defmacro =>*
