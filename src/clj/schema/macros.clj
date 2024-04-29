@@ -597,26 +597,3 @@
    See (doc compile-fn-validation?) for all conditions which control fn validation compilation"
   [on?]
   (reset! *compile-fn-validation* on?))
-
-(defn register-class-preds
-  "Collect the likely Class's referred to by this form and return forms to
-  register their fast predicates. If not a top-level form, returns nothing."
-  [&env form]
-  (when-not (or (cljs-env? &env) bb?)
-    (let [candidates (atom [])
-          _ (walk/postwalk (fn [form]
-                             (when (symbol? form)
-                               (let [c (resolve &env form)
-                                     ;; (def a Class) is a common idiom because (defschema a Class) doesn't work
-                                     c (cond-> c (var? c) deref)]
-                                 (when (and (class? c)
-                                            (or *compile-files*
-                                                (not (utils/get-class-pred c))))
-                                   (swap! candidates conj c))))
-                             form)
-                           form)]
-      (map (fn [^Class cls]
-             (let [cls-sym (symbol (.getName cls))]
-               `(or (utils/get-class-pred ~cls-sym)
-                    (utils/register-class-pred! ~cls-sym #(instance? ~cls-sym %)))))
-           @candidates))))
