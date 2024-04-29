@@ -202,10 +202,14 @@
    (let [class->pred (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
      (defn register-class-pred! [cls pred]
        (when (class? cls)
-         (.put class->pred cls pred))
+         (.put class->pred
+               cls
+               ;; predicates refer to the classes they test for
+               (java.lang.ref.WeakReference. pred)))
        pred)
      (defn get-class-pred [cls]
-       (or (.get class->pred cls)
+       (or (when-some [^java.lang.ref.WeakReference ref (.get class->pred cls)]
+             (.get ref))
            (register-class-pred! cls (eval `#(instance? ~cls %)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
