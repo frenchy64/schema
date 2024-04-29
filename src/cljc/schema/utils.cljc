@@ -169,6 +169,66 @@
   (defn class-schema [klass]
     (gobject/get klass "schema$utils$schema"))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for caching Schema's of classes and other non-IMeta's used for Schema syntax
+
+#?(:clj
+(let [^java.util.Map +id->syntax-schema+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+  (defn declare-syntax-schema!
+    "Cache the schema for primitive (non-IMeta) Schema syntax."
+    [id syntax-schema]
+    (when-not (class-schema syntax-schema)
+      (.put +id->syntax-schema+ id syntax-schema))
+    syntax-schema)
+
+  (defn get-syntax-schema
+    "The a syntax-schema for schema syntax id or nil."
+    [id]
+    (.get +id->syntax-schema+ id))))
+
+#?(:cljs
+(do
+  (defn declare-syntax-schema! [id syntax-schema]
+    (gobject/set id "schema$utils$syntax_schema" syntax-schema)
+    syntax-schema)
+
+  (defn get-syntax-schema [id]
+    (gobject/get id "schema$utils$syntax_schema"))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for fast class predicates
+
+#?(:clj
+   (let [class->pred (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+     (defn register-class-pred! [cls pred]
+       (when (class? cls)
+         (.put class->pred
+               cls
+               ;; predicates refer to the classes they test for
+               (java.lang.ref.WeakReference. pred)))
+       pred)
+     (defn get-class-pred [cls]
+       (or (when-some [^java.lang.ref.WeakReference ref (.get class->pred cls)]
+             (.get ref))
+           (register-class-pred! cls (eval `#(instance? ~cls %)))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for precomputed checkers
+
+#?(:clj
+   (let [schema->checker (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+     (defn register-schema-checker! [s checker]
+       (.put schema->checker s checker)
+       checker)
+     (defn get-schema-checker [s]
+       (.get schema->checker s)))
+   :cljs 
+   (do
+     (defn register-schema-checker! [s checker]
+       (gobject/set id "schema$core$checker" checker)
+       checker)
+     (defn get-schema-checker [s]
+       (gobject/get s "schema$core$checker"))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Utilities for fast-as-possible reference to use to turn fn schema validation on/off
@@ -181,3 +241,66 @@
   #?(:bb (atom false)
      :clj (java.util.concurrent.atomic.AtomicReference. false)
      :cljs (atom false)))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Cached fields
+
+(defn soft-delay* [f]
+  #?(:clj (let [v (volatile! nil)]
+            (reify
+              clojure.lang.IDeref
+              (deref [_]
+                (or (when-some [^java.lang.ref.SoftReference r @v]
+                      (.get r))
+                    (let [res (f)]
+                      (vreset! v (java.lang.ref.SoftReference. res))
+                      res)))))
+     :cljs (reify
+             cljs.core/IDeref
+             ;;TODO WeakRef? https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakRef
+             (-deref [_] (f)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Helpers to create cached fields in Schema records
+
+;; this gives us something similar to deftype's mutable fields or reify's closures,
+;; without having to change our public-facing API.
+;; in schema.core to keep all defn's private even though we provide a macro
+
+(let #?(:clj [field->Map (let [+cached-record-specs+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))
+                               +cached-record-explains+ (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+                           #(case %
+                              :spec +cached-record-specs+
+                              :explain +cached-record-explains+))]
+        :cljs [->id (fn [cls-name field]
+                      (str "schema$core$" cls-name "$" (name field)))])
+  (defn ^:internal -set-cached-record-field-fn [this cls-name field this->v]
+    (let [f (let [d (soft-delay* #(this->v this))]
+              (fn [this']
+                (when (identical? this this')
+                  (assert d)
+                  @d)))
+          ;; we use mutable maps so we can always update the cache
+          ;; on a cache-miss. if a library creates a spec using the position
+          ;; ctor, we then don't need to care if they initialize a cache field,
+          ;; which also helps ensure backwards compatibility.
+          _ #?(:clj (let [^java.util.Map weak (field->Map field)]
+                      (.put weak this f)
+                      f)
+               :cljs (gobject/set this (->id cls-name field) f))]
+      f))
+
+  (defn ^:internal -get-cached-record-field [this cls-name field this->v]
+    (or (when-some [f #?(:clj (let [^java.util.Map weak (field->Map field)]
+                                (.get weak this))
+                         :cljs (gobject/get this (->id cls-name field)))]
+          (f this))
+        ((-set-cached-record-field-fn
+           this cls-name field this->v)
+         this))))
+
+(defn ^:internal -construct-cached-schema-record [this cls-name this->spec this->explain]
+  (assert (symbol? cls-name))
+  (doto this
+    (-set-cached-record-field-fn cls-name :spec this->spec)
+    (-set-cached-record-field-fn cls-name :explain this->explain)))

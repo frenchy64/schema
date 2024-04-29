@@ -79,30 +79,44 @@
   (:require
    #?(:clj [clojure.pprint :as pprint])
    [clojure.string :as str]
-   #?(:clj [schema.macros :as macros])
-   [schema.utils :as utils]
+   #?(:clj [schema.macros :as macros :refer [defrecord-cached-schema soft-delay]])
+   #?(:cljs [goog.object :as gobject])
+   [schema.protocols :as prot]
+   [schema.utils :as utils :refer [-construct-cached-schema-record]]
    [schema.spec.core :as spec :include-macros true]
    [schema.spec.leaf :as leaf]
    [schema.spec.variant :as variant]
-   [schema.spec.collection :as collection])
-  #?(:cljs (:require-macros [schema.macros :as macros]
-                            schema.core)))
+   [schema.spec.collection :as collection]
+   [clojure.core :as cc])
+  #?(:cljs (:require-macros [schema.macros :as macros :refer [defrecord-cached-schema soft-delay]]
+                            [schema.core])))
 
 #?(:clj (set! *warn-on-reflection* true))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Schema protocol
 
-(clojure.core/defprotocol Schema
-  (spec [this]
-    "A spec is a record of some type that expresses the structure of this schema
-     in a declarative and/or imperative way.  See schema.spec.* for examples.")
-  (explain [this]
-    "Expand this schema to a human-readable format suitable for pprinting,
-     also expanding class schematas at the leaves.  Example:
+(when #?(:clj (let [v (resolve 'Schema)]
+                (or (not (var? v))
+                    (not (some-> v deref map?))))
+         :cljs true)
+  (clojure.core/defprotocol Schema
+    (spec [this]
+      "A spec is a record of some type that expresses the structure of this schema
+       in a declarative and/or imperative way.  See schema.spec.* for examples.")
+    (explain [this]
+      "Expand this schema to a human-readable format suitable for pprinting,
+       also expanding class schematas at the leaves.  Example:
 
-     user> (s/explain {:a s/Keyword :b [s/Int]} )
-     {:a Keyword, :b [Int]}"))
+       user> (s/explain {:a s/Keyword :b [s/Int]} )
+       {:a Keyword, :b [Int]}")))
+
+(extend-protocol prot/SchemaSyntax
+  nil
+  (original-syntax [_] nil)
+  #?(:clj Object :cljs default)
+  (original-syntax [this] this))
+
 
 #?(:clj
 (clojure.core/defn register-schema-print-as-explain [t]
@@ -121,11 +135,16 @@
 
 (clojure.core/defn checker
   "Compile an efficient checker for schema, which returns nil for valid values and
-   error descriptions otherwise."
+  error descriptions otherwise."
   [schema]
-  (comp utils/error-val
-        (spec/run-checker
-         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)))
+  (or (utils/get-schema-checker schema)
+      (let [->checker #(spec/run-checker-info
+                         (clojure.core/fn [s params] (spec/checker (spec s) params)) false schema)
+            {:keys [checker recursive]} (->checker)
+            checker+unwrap (comp utils/error-val checker)]
+        (when-not recursive
+          (utils/register-schema-checker! schema checker+unwrap))
+        checker+unwrap)))
 
 (clojure.core/defn check
   "Return nil if x matches schema; otherwise, returns a value that looks like the
@@ -160,14 +179,26 @@
 ;; function prototype checks objects for compatibility. In BB, defrecord classes can also be
 ;; instances of sci.lang.Type, and the interpreter extends `instance?` to support it as first arg.
 
-(clojure.core/defn instance-precondition [s klass]
-  (spec/precondition
-   s
-   #?(:clj #(instance? klass %)
-      :cljs #(and (not (nil? %))
-                  (or (identical? klass (.-constructor %))
-                      (js* "~{} instanceof ~{}" % klass))))
-   #(list 'instance? klass %)))
+(defn- instance-pred [klass]
+  #?(:bb #(instance? klass %)
+     :clj (or (utils/get-class-pred klass)
+              (try (utils/register-class-pred! klass (eval `#(instance? ~klass %)))
+                   (catch Exception _ #(instance? klass %))))
+     :cljs #(and (not (nil? %))
+                 (or (identical? klass (.-constructor %))
+                     (js* "~{} instanceof ~{}" % klass)))))
+
+(comment
+  (time (spec Integer))
+  (time (spec java.util.Map))
+  (time (spec ['a]))
+  (time (spec [Integer]))
+  (time (spec (nth (iterate #(vector #{%}) (eq 100)) 100)))
+  )
+
+(clojure.core/defn instance-precondition
+  ([s klass] (instance-precondition s klass (instance-pred klass)))
+  ([s klass pred] (spec/precondition s pred #(list 'instance? klass %))))
 
 (defn- -class-spec [this]
   (let [pre (instance-precondition this this)]
@@ -190,15 +221,27 @@
                   (symbol (.getName ^Class this)))
          :cljs this))))
 
+(defn- -class-schema [this]
+  (or (utils/get-syntax-schema this)
+      (utils/declare-syntax-schema!
+        this
+        (let [sp (soft-delay (-class-spec this))
+              expl (soft-delay (-class-explain this))]
+          (reify
+            prot/SchemaSyntax
+            (original-syntax [_] this)
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl))))))
+
 (extend-protocol Schema
   #?(:clj Class
      :cljs function)
-  (spec [this] (-class-spec this))
-  (explain [this] (-class-explain this))
+  (spec [this] (-> this -class-schema spec))
+  (explain [this] (-> this -class-schema explain))
   #?@(:bb [sci.lang.Type
-           (spec [this] (-class-spec this))
-           (explain [this] (-class-explain this))]))
-
+           (spec [this] (-> this -class-schema spec))
+           (explain [this] (-> this -class-schema explain))]))
 
 ;; On the JVM, the primitive coercion functions (double, long, etc)
 ;; alias to the corresponding boxed number classes
@@ -207,12 +250,11 @@
 (do
   (defmacro extend-primitive [cast-sym class-sym]
     (let [qualified-cast-sym `(class @(resolve '~cast-sym))]
-      `(extend-protocol Schema
-         ~qualified-cast-sym
-         (spec [this#]
-           (variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}]))
-         (explain [this#]
-           '~cast-sym))))
+      `(let [spec# (soft-delay (variant/variant-spec spec/+no-precondition+ [{:schema ~class-sym}]))]
+         (extend-protocol Schema
+           ~qualified-cast-sym
+           (spec [_#] @spec#)
+           (explain [_#] '~cast-sym)))))
 
   (extend-primitive double Double)
   (extend-primitive float Float)
@@ -232,17 +274,20 @@
   (extend-primitive bytes (Class/forName "[B"))
   (extend-primitive booleans (Class/forName "[Z"))))
 
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Cross-platform Schema leaves
 
 ;;; Any matches anything (including nil)
+
+(def ^:private -Anything-spec (soft-delay (leaf/leaf-spec spec/+no-precondition+)))
 
 (macros/defrecord-schema AnythingSchema [_]
   ;; _ is to work around bug in Clojure where eval-ing defrecord with no fields
   ;; loses type info, which makes this unusable in schema-fn.
   ;; http://dev.clojure.org/jira/browse/CLJ-1093
   Schema
-  (spec [this] (leaf/leaf-spec spec/+no-precondition+))
+  (spec [this] @-Anything-spec)
   (explain [this] 'Any))
 
 (def Any
@@ -252,55 +297,92 @@
 
 ;;; eq (to a single allowed value)
 
-(macros/defrecord-schema EqSchema [v]
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this #(= v %) #(list '= v %))))
-  (explain [this] (list 'eq v)))
+(defrecord-cached-schema EqSchema [v]
+  -Eq-spec
+  -Eq-explain)
+
+(defn- -Eq-explain [^EqSchema this]
+  (list 'eq (.-v this)))
+
+(defn- -Eq-spec [^EqSchema this]
+  (let [v (.-v this)]
+    (leaf/leaf-spec (spec/precondition this #(= v %) #(list '= v %)))))
 
 (clojure.core/defn eq
   "A value that must be (= v)."
   [v]
-  (EqSchema. v))
+  (-> (EqSchema. v)
+      (-construct-cached-schema-record
+        'EqSchema -Eq-spec -Eq-explain)))
 
 
 ;;; isa (a child of parent)
 
-(macros/defrecord-schema Isa [h parent]
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this
-                                                  #(if h
-                                                     (isa? h % parent)
-                                                     (isa? % parent))
-                                                  #(list 'isa? % parent))))
-  (explain [this] (list 'isa? parent)))
+(defrecord-cached-schema Isa [h parent]
+  -Isa-spec
+  -Isa-explain)
+
+(defn- -Isa-spec [^Isa this]
+  (let [h (.-h this)
+        parent (.-parent this)]
+    (leaf/leaf-spec (spec/precondition this
+                                       (if h
+                                         #(isa? h % parent)
+                                         #(isa? % parent))
+                                       #(list 'isa? % parent)))))
+
+(defn- -Isa-explain [^Isa this]
+  (list 'isa? (.-parent this)))
+
 
 (clojure.core/defn isa
   "A value that must be a child of parent."
   ([parent]
-     (Isa. nil parent))
+     (isa nil parent))
   ([h parent]
-     (Isa. h parent)))
+     (-> (Isa. h parent)
+         (-construct-cached-schema-record
+           'Isa -Isa-spec -Isa-explain))))
 
 
 ;;; enum (in a set of allowed values)
 
-(macros/defrecord-schema EnumSchema [vs]
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this #(contains? vs %) #(list vs %))))
-  (explain [this] (cons 'enum vs)))
+(defrecord-cached-schema EnumSchema [vs]
+  -Enum-spec
+  -Enum-explain)
+
+(defn- -Enum-spec [^EnumSchema this]
+  (let [vs (.-vs this)]
+    (leaf/leaf-spec (spec/precondition this #(contains? vs %) #(list vs %)))))
+
+(defn- -Enum-explain [^EnumSchema this]
+  (cons 'enum (or (::original-vs this)
+                  (.-vs this))))
+
 
 (clojure.core/defn enum
   "A value that must be = to some element of vs."
   [& vs]
-  (EnumSchema. (set vs)))
+  (-> (assoc (EnumSchema. (set vs)) ::original-vs vs)
+      (-construct-cached-schema-record
+        'Enum -Enum-spec -Enum-explain)))
+
 
 
 ;;; pred (matches all values for which p? returns truthy)
 
-(macros/defrecord-schema Predicate [p? pred-name]
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/precondition this p? #(list pred-name %))))
-  (explain [this]
+(defrecord-cached-schema Predicate [p? pred-name]
+  -Predicate-spec
+  -Predicate-explain)
+
+(defn- -Predicate-spec [^Predicate this]
+  (let [p? (.-p? this)
+        pred-name (.-pred-name this)]
+    (leaf/leaf-spec (spec/precondition this p? #(list pred-name %)))))
+
+(defn- -Predicate-explain [^Predicate this]
+  (let [p? (.-p? this)
+        pred-name (.-pred-name this)]
     (cond (= p? integer?) 'Int
           (= p? keyword?) 'Keyword
           (= p? symbol?) 'Symbol
@@ -314,7 +396,9 @@
   ([p? pred-name]
      (when-not (ifn? p?)
        (macros/error! (utils/format* "Not a function: %s" p?)))
-     (Predicate. p? pred-name)))
+     (-> (Predicate. p? pred-name) 
+         (-construct-cached-schema-record
+           'Predicate -Predicate-spec -Predicate-explain))))
 
 
 ;;; protocol (which value must `satisfies?`)
@@ -324,15 +408,26 @@
 
 ;; In cljs, satisfies? is a macro so we must precompile (partial satisfies? p)
 ;; and put it in metadata of the record so that equality is preserved, along with the name.
-(macros/defrecord-schema Protocol [p]
-  Schema
-  (spec [this]
+(defrecord-cached-schema Protocol [p]
+  -Protocol-spec
+  -Protocol-explain)
+
+(defn- -Protocol-spec [^Protocol this]
+  (let [p (.-p this)]
     (leaf/leaf-spec
-     (spec/precondition
-      this
-      (:proto-pred (meta this))
-      #(list 'satisfies? (protocol-name this) %))))
-  (explain [this] (list 'protocol (protocol-name this))))
+      (spec/precondition
+        this
+        (:proto-pred (meta this))
+        #(list 'satisfies? (protocol-name this) %)))))
+
+(defn- -Protocol-explain [this]
+  (list 'protocol (protocol-name this)))
+
+;;added to avoid making -construct-cached-schema-record public
+(clojure.core/defn protocol* [this]
+  (-> this
+      (-construct-cached-schema-record
+        'Protocol -Protocol-spec -Protocol-explain)))
 
 ;; The cljs version is macros/protocol by necessity, since cljs `satisfies?` is a macro.
 #?(:clj
@@ -345,24 +440,37 @@
 
    A macro for cljs sake, since `satisfies?` is a macro in cljs."
   [p]
-  `(with-meta (->Protocol ~p)
-     {:proto-pred #(satisfies? ~p %)
-      :proto-sym '~p})))
+  `(protocol*
+     (with-meta (->Protocol ~p)
+                {:proto-pred #(satisfies? ~p %)
+                 :proto-sym '~p}))))
 
 
 ;;; regex (validates matching Strings)
 
+(defn- -re-schema [this]
+  (or (utils/get-syntax-schema this)
+      (utils/declare-syntax-schema!
+        this
+        (let [sp (soft-delay (leaf/leaf-spec
+                               (some-fn
+                                 (spec/simple-precondition this string?)
+                                 (spec/precondition this #(re-find this %) #(list 're-find (explain this) %)))))
+              expl (soft-delay
+                     #?(:clj (symbol (str "#\"" this "\""))
+                        :cljs (symbol (str "#\"" (.slice (str this) 1 -1) "\""))))]
+          (reify
+            prot/SchemaSyntax
+            (original-syntax [_] this)
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl))))))
+
 (extend-protocol Schema
   #?(:clj java.util.regex.Pattern
      :cljs js/RegExp)
-  (spec [this]
-    (leaf/leaf-spec
-     (some-fn
-      (spec/simple-precondition this string?)
-      (spec/precondition this #(re-find this %) #(list 're-find (explain this) %)))))
-  (explain [this]
-    #?(:clj (symbol (str "#\"" this "\""))
-       :cljs (symbol (str "#\"" (.slice (str this) 1 -1) "\"")))))
+  (spec [this] (-> this -re-schema spec))
+  (explain [this] (-> this -re-schema explain)))
 
 
 ;;; Cross-platform Schemas for atomic value types
@@ -370,15 +478,21 @@
 (def Str
   "Satisfied only by String.
    Is (pred string?) and not js/String in cljs because of keywords."
-  #?(:clj java.lang.String :cljs (pred string? 'string?)))
+  #?(:clj (doto java.lang.String
+            (utils/register-class-pred! string?))
+     :cljs (pred string? 'string?)))
 
 (def Bool
   "Boolean true or false"
-  #?(:clj java.lang.Boolean :cljs js/Boolean))
+  #?(:clj (doto java.lang.Boolean
+            (utils/register-class-pred! #(instance? Boolean %)))
+     :cljs js/Boolean))
 
 (def Num
   "Any number"
-  #?(:clj java.lang.Number :cljs js/Number))
+  #?(:clj (doto java.lang.Number
+            (utils/register-class-pred! number?))
+     :cljs js/Number))
 
 (def Int
   "Any integral number"
@@ -394,7 +508,8 @@
 
 (def Regex
   "A regular expression"
-  #?(:clj java.util.regex.Pattern
+  #?(:clj (doto java.util.regex.Pattern
+            (utils/register-class-pred! #(instance? java.util.regex.Pattern %)))
      :cljs (reify Schema ;; Closure doesn't like if you just def as js/RegExp
              (spec [this]
                (leaf/leaf-spec
@@ -403,11 +518,15 @@
 
 (def Inst
   "The local representation of #inst ..."
-  #?(:clj java.util.Date :cljs js/Date))
+  #?(:clj (doto java.util.Date
+            (utils/register-class-pred! #(instance? java.util.Date %)))
+     :cljs js/Date))
 
 (def Uuid
   "The local representation of #uuid ..."
-  #?(:clj java.util.UUID :cljs cljs.core/UUID))
+  #?(:clj (doto java.util.UUID
+            (utils/register-class-pred! #(instance? java.util.UUID %)))
+     :cljs cljs.core/UUID))
 
 
 
@@ -416,49 +535,76 @@
 
 ;;; maybe (nil)
 
-(macros/defrecord-schema Maybe [schema]
-  Schema
-  (spec [this]
-    (variant/variant-spec
-     spec/+no-precondition+
-     [{:guard nil? :schema (eq nil)}
-      {:schema schema}]))
-  (explain [this] (list 'maybe (explain schema))))
+(defrecord-cached-schema Maybe [schema]
+  -Maybe-spec
+  -Maybe-explain)
+
+(let [nil-option (soft-delay {:guard nil? :schema (eq nil)})]
+  (defn- -Maybe-spec [^Maybe this]
+    (let [schema (.-schema this)]
+      (variant/variant-spec
+        spec/+no-precondition+
+        [@nil-option
+         {:schema schema}]))))
+
+(defn- -Maybe-explain [^Maybe this]
+  (let [schema (.-schema this)]
+    (list 'maybe (explain schema))))
+
 
 (clojure.core/defn maybe
   "A value that must either be nil or satisfy schema"
   [schema]
-  (Maybe. schema))
-
+  (-> (Maybe. schema)
+      (-construct-cached-schema-record
+        'Maybe -Maybe-spec -Maybe-explain)))
 
 ;;; named (schema elements)
 
-(macros/defrecord-schema NamedSchema [schema name]
-  Schema
-  (spec [this]
+(defrecord-cached-schema NamedSchema [schema name]
+  -Named-spec
+  -Named-explain)
+
+(defn- -Named-spec [^NamedSchema this]
+  (let [schema (.-schema this)
+        name (.-name this)]
     (variant/variant-spec
-     spec/+no-precondition+
-     [{:schema schema :wrap-error #(utils/->NamedError name %)}]))
-  (explain [this] (list 'named (explain schema) name)))
+      spec/+no-precondition+
+      [{:schema schema :wrap-error #(utils/->NamedError name %)}])))
+
+(defn- -Named-explain [^NamedSchema this]
+  (let [schema (.-schema this)
+        name (.-name this)]
+    (list 'named (explain schema) name)))
+
 
 (clojure.core/defn named
   "A value that must satisfy schema, and has a name for documentation purposes."
   [schema name]
-  (NamedSchema. schema name))
+  (-> (NamedSchema. schema name)
+      (-construct-cached-schema-record
+        'NamedSchema -Named-spec -Named-explain)))
 
 
 ;;; either (satisfies this schema or that one)
 
-(macros/defrecord-schema Either [schemas]
-  Schema
-  (spec [this]
+(defrecord-cached-schema Either [schemas]
+  -Either-spec
+  -Either-explain)
+
+(defn- -Either-spec [^Either this]
+  (let [schemas (.-schemas this)]
     (variant/variant-spec
-     spec/+no-precondition+
-     (for [s schemas]
-       {:guard (complement (checker s)) ;; since the guard determines which option we check against
-        :schema s})
-     #(list 'some-matching-either-clause? %)))
-  (explain [this] (cons 'either (map explain schemas))))
+      spec/+no-precondition+
+      (for [s schemas]
+        {:guard (complement (checker s)) ;; since the guard determines which option we check against
+         :schema s})
+      #(list 'some-matching-either-clause? %))))
+
+(defn- -Either-explain [^Either this]
+  (let [schemas (.-schemas this)]
+    (cons 'either (map explain schemas))))
+
 
 (clojure.core/defn ^{:deprecated "1.0.0"} either
   "A value that must satisfy at least one schema in schemas.
@@ -471,29 +617,38 @@
    instead; they are more efficient, provide better error messages,
    and work with coercion."
   [& schemas]
-  (Either. schemas))
+  (-> (Either. schemas)
+      (-construct-cached-schema-record
+        'Either -Either-spec -Either-explain)))
 
 
 ;;; conditional (choice of schema, based on predicates on the value)
 
-(macros/defrecord-schema ConditionalSchema [preds-and-schemas error-symbol]
-  Schema
-  (spec [this]
+(defrecord-cached-schema ConditionalSchema [preds-and-schemas error-symbol]
+  -Conditional-spec
+  -Conditional-explain)
+
+(defn- -Conditional-spec [^ConditionalSchema this]
+  (let [preds-and-schemas (.-preds-and-schemas this)
+        error-symbol (.-error-symbol this)]
     (variant/variant-spec
-     spec/+no-precondition+
-     (for [[p s] preds-and-schemas]
-       {:guard p :schema s})
-     #(list (or error-symbol
-                (if (= 1 (count preds-and-schemas))
-                  (symbol (utils/fn-name (ffirst preds-and-schemas)))
-                  'some-matching-condition?))
-            %)))
-  (explain [this]
+      spec/+no-precondition+
+      (for [[p s] preds-and-schemas]
+        {:guard p :schema s})
+      #(list (or error-symbol
+                 (if (= 1 (count preds-and-schemas))
+                   (symbol (utils/fn-name (ffirst preds-and-schemas)))
+                   'some-matching-condition?))
+             %))))
+
+(defn- -Conditional-explain [^ConditionalSchema this]
+  (let [preds-and-schemas (.-preds-and-schemas this)
+        error-symbol (.-error-symbol this)]
     (cons 'conditional
           (concat
-           (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
-                   preds-and-schemas)
-           (when error-symbol [error-symbol])))))
+            (mapcat (clojure.core/fn [[pred schema]] [(symbol (utils/fn-name pred)) (explain schema)])
+                    preds-and-schemas)
+            (when error-symbol [error-symbol])))))
 
 (clojure.core/defn conditional
   "Define a conditional schema.  Takes args like cond,
@@ -512,21 +667,26 @@
             (symbol? (last preds-and-schemas))))
    "Expected even, nonzero number of args (with optional trailing symbol); got %s"
    (count preds-and-schemas))
-  (ConditionalSchema.
-   (vec
-    (for [[pred schema] (partition 2 preds-and-schemas)]
-      (do (macros/assert! (ifn? pred) (str "Conditional predicate " pred " must be a function"))
-          [(if (= pred :else) (constantly true) pred) schema])))
-   (if (odd? (count preds-and-schemas)) (last preds-and-schemas))))
+  (-> (ConditionalSchema. (vec
+                            (for [[pred schema] (partition 2 preds-and-schemas)]
+                              (do (macros/assert! (ifn? pred) (str "Conditional predicate " pred " must be a function"))
+                                  [(if (= pred :else) (constantly true) pred) schema])))
+                          (if (odd? (count preds-and-schemas)) (last preds-and-schemas)))
+      (-construct-cached-schema-record
+        'Conditional -Conditional-spec -Conditional-explain)))
 
 
 ;; cond-pre (conditional based on surface type)
 
-(clojure.core/defprotocol HasPrecondition
-  (precondition [this]
-    "Return a predicate representing the Precondition for this schema:
-     the predicate returns true if the precondition is satisfied.
-     (See spec.core for more details)"))
+(when #?(:clj (let [v (resolve 'HasPrecondition)]
+                (or (not (var? v))
+                    (not (some-> v deref map?))))
+         :cljs true)
+  (clojure.core/defprotocol HasPrecondition
+    (precondition [this]
+      "Return a predicate representing the Precondition for this schema:
+       the predicate returns true if the precondition is satisfied.
+       (See spec.core for more details)")))
 
 (extend-protocol HasPrecondition
   schema.spec.leaf.LeafSpec
@@ -547,18 +707,24 @@
   (precondition [this]
     (complement (.-pre ^schema.spec.collection.CollectionSpec this))))
 
-(macros/defrecord-schema CondPre [schemas]
-  Schema
-  (spec [this]
+(defrecord-cached-schema CondPre [schemas]
+  -CondPre-spec
+  -CondPre-explain)
+
+(defn- -CondPre-spec [^CondPre this]
+  (let [schemas (.-schemas this)]
     (variant/variant-spec
-     spec/+no-precondition+
-     (for [s schemas]
-       {:guard (precondition (spec s))
-        :schema s})
-     #(list 'matches-some-precondition? %)))
-  (explain [this]
+      spec/+no-precondition+
+      (for [s schemas]
+        {:guard (precondition (spec s))
+         :schema s})
+      #(list 'matches-some-precondition? %))))
+
+(defn- -CondPre-explain [^CondPre this]
+  (let [schemas (.-schemas this)]
     (cons 'cond-pre
           (map explain schemas))))
+
 
 (clojure.core/defn cond-pre
   "A replacement for `either` that constructs a conditional schema
@@ -578,19 +744,29 @@
 
    EXPERIMENTAL"
   [& schemas]
-  (CondPre. schemas))
+  (-> (CondPre. schemas)
+      (-construct-cached-schema-record
+        'CondPre -CondPre-spec -CondPre-explain)))
 
 ;; constrained (post-condition on schema)
 
-(macros/defrecord-schema Constrained [schema postcondition post-name]
-  Schema
-  (spec [this]
+(defrecord-cached-schema Constrained [schema postcondition post-name]
+  -Constrained-spec
+  -Constrained-explain)
+
+(defn- -Constrained-spec [^Constrained this]
+  (let [schema (.-schema this)
+        postcondition (.-postcondition this)
+        post-name (.-post-name this)]
     (variant/variant-spec
-     spec/+no-precondition+
-     [{:schema schema}]
-     nil
-     (spec/precondition this postcondition #(list post-name %))))
-  (explain [this]
+      spec/+no-precondition+
+      [{:schema schema}]
+      nil
+      (spec/precondition this postcondition #(list post-name %)))))
+
+(defn- -Constrained-explain [^Constrained this]
+  (let [schema (.-schema this)
+        post-name (.-post-name this)]
     (list 'constrained (explain schema) post-name)))
 
 (clojure.core/defn constrained
@@ -602,14 +778,15 @@
   ([s p? pred-name]
      (when-not (ifn? p?)
        (macros/error! (utils/format* "Not a function: %s" p?)))
-     (Constrained. s p? pred-name)))
+     (-> (Constrained. s p? pred-name)
+         (-construct-cached-schema-record
+           'Constrained -Constrained-spec -Constrained-explain))))
 
 ;;; both (satisfies this schema and that one)
 
-(macros/defrecord-schema Both [schemas]
-  Schema
-  (spec [this] this)
-  (explain [this] (cons 'both (map explain schemas)))
+(defrecord-cached-schema Both [schemas]
+  -Both-spec
+  -Both-explain
   HasPrecondition
   (precondition [this]
     (apply every-pred (map (comp precondition spec) schemas)))
@@ -625,6 +802,13 @@
              (f (or tx x))))))
      (map #(spec/sub-checker {:schema %} params) (reverse schemas)))))
 
+(defn- -Both-spec [this] this)
+
+(defn- -Both-explain [^Both this]
+  (let [schemas (.-schemas this)]
+    (cons 'both (map explain schemas))))
+
+
 (clojure.core/defn ^{:deprecated "1.0.0"} both
   "A value that must satisfy every schema in schemas.
 
@@ -633,7 +817,9 @@
 
    When used with coercion, coerces each schema in sequence."
   [& schemas]
-  (Both. schemas))
+  (-> (Both. schemas)
+      (-construct-cached-schema-record
+        'Both -Both-spec -Both-explain)))
 
 
 (clojure.core/defn if
@@ -652,10 +838,16 @@
                     :cljs ns)
                  "/" name))))
 
-(macros/defrecord-schema Recursive [derefable]
-  Schema
-  (spec [this] (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}]))
-  (explain [this]
+(defrecord-cached-schema Recursive [derefable]
+  -Recursive-spec
+  -Recursive-explain)
+
+(defn- -Recursive-spec [^Recursive this]
+  (let [derefable (.-derefable this)]
+    (variant/variant-spec spec/+no-precondition+ [{:schema @derefable}])))
+
+(defn- -Recursive-explain [^Recursive this]
+  (let [derefable (.-derefable this)]
     (list 'recursive
           (if #?(:clj (var? derefable)
                  :cljs (instance? Var derefable))
@@ -667,6 +859,7 @@
                :cljs
                '...)))))
 
+
 (clojure.core/defn recursive
   "Support for (mutually) recursive schemas by passing a var that points to a schema,
    e.g (recursive #'ExampleRecursiveSchema)."
@@ -674,7 +867,9 @@
   (macros/assert! #?(:clj (instance? clojure.lang.IDeref schema)
                      :cljs (satisfies? IDeref schema))
                   "Not an IDeref: %s" schema)
-  (Recursive. schema))
+  (-> (Recursive. schema)
+      (-construct-cached-schema-record
+        'Recursive -Recursive-spec -Recursive-explain)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -684,20 +879,28 @@
   #?(:clj (instance? clojure.lang.Atom x)
      :cljs (satisfies? IAtom x)))
 
-(macros/defrecord-schema Atomic [schema]
-  Schema
-  (spec [this]
+(defrecord-cached-schema Atomic [schema]
+  -Atomic-spec
+  -Atomic-explain)
+
+(defn- -Atomic-spec [^Atomic this]
+  (let [schema (.-schema this)]
     (collection/collection-spec
-     (spec/simple-precondition this atom?)
-     clojure.core/atom
-     [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
-     (clojure.core/fn [_ xs _] (clojure.core/atom (first xs)))))
-  (explain [this] (list 'atom (explain schema))))
+      (spec/simple-precondition this atom?)
+      clojure.core/atom
+      [(collection/one-element true schema (clojure.core/fn [item-fn coll] (item-fn @coll) nil))]
+      (clojure.core/fn [_ xs _] (clojure.core/atom (first xs))))))
+
+(defn- -Atomic-explain [^Atomic this]
+  (let [schema (.-schema this)]
+    (list 'atom (explain schema))))
 
 (clojure.core/defn atom
   "An atom containing a value matching 'schema'."
   [schema]
-  (->Atomic schema))
+  (-> (->Atomic schema)
+      (-construct-cached-schema-record
+        'Atomic -Atomic-spec -Atomic-explain)))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -762,26 +965,32 @@
      :cljs (cljs.core.MapEntry. k v nil)))
 
 ;; A schema for a single map entry.
-(macros/defrecord-schema MapEntry [key-schema val-schema]
-  Schema
-  (spec [this]
+(defrecord-cached-schema MapEntry [key-schema val-schema]
+  -MapEntry-spec
+  -MapEntry-explain)
+
+(defn- -MapEntry-spec [^MapEntry this]
+  (let [key-schema (.-key-schema this)
+        val-schema (.-val-schema this)]
     (collection/collection-spec
-     spec/+no-precondition+
-     map-entry-ctor
-     [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
-      (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
-     (clojure.core/fn [[k] [xk xv] _]
-       (if-let [k-err (utils/error-val xk)]
-         [k-err 'invalid-key]
-         [k (utils/error-val xv)]))))
-  (explain [this]
-    (list
-     'map-entry
-     (explain key-schema)
-     (explain val-schema))))
+      spec/+no-precondition+
+      map-entry-ctor
+      [(collection/one-element true key-schema (clojure.core/fn [item-fn e] (item-fn (key e)) e))
+       (collection/one-element true val-schema (clojure.core/fn [item-fn e] (item-fn (val e)) nil))]
+      (clojure.core/fn [[k] [xk xv] _]
+        (if-let [k-err (utils/error-val xk)]
+          [k-err 'invalid-key]
+          [k (utils/error-val xv)])))))
+
+(defn- -MapEntry-explain [^MapEntry this]
+  (let [key-schema (.-key-schema this)
+        val-schema (.-val-schema this)]
+    (list 'map-entry (explain key-schema) (explain val-schema))))
 
 (clojure.core/defn map-entry [key-schema val-schema]
-  (MapEntry. key-schema val-schema))
+  (-> (MapEntry. key-schema val-schema)
+      (-construct-cached-schema-record
+        'MapEntry -MapEntry-spec -MapEntry-explain)))
 
 (clojure.core/defn find-extra-keys-schema [map-schema]
   (let [key-schemata (remove specific-key? (keys map-schema))]
@@ -827,33 +1036,50 @@
                           rk)
                   m))))))
        (when extra-keys-schema
-         (let [specific-keys (set (map explicit-schema-key (keys without-extra-keys-schema)))
+         (let [specific-keys (into #{} (map explicit-schema-key) (keys without-extra-keys-schema))
                [ks vs] (find this extra-keys-schema)
                restricted-ks (constrained ks #(not (contains? specific-keys %)))]
            [(collection/all-elements (map-entry restricted-ks vs))]))))))
 
 (defn- map-error []
   (clojure.core/fn [_ elts extra]
-    (into {} (concat (keep utils/error-val elts) (for [[k _] extra] [k 'disallowed-key])))))
+    (-> {}
+        (into (keep utils/error-val) elts)
+        (into (map (cc/fn [[k]] [k 'disallowed-key])) extra))))
 
 (defn- map-spec [this]
   (collection/collection-spec
-   (spec/simple-precondition this map?)
-   #(into {} %)
-   (map-elements this)
-   (map-error)))
+    (spec/simple-precondition this map?)
+    #(into {} %)
+    (map-elements this)
+    (map-error)))
 
 (clojure.core/defn- map-explain [this]
-  (into {} (for [[k v] this] [(explain-kspec k) (explain v)])))
+  (reduce-kv (cc/fn [m k v]
+               (assoc m (explain-kspec k) (explain v)))
+             {} this))
+
+(defn- -map-schema [this]
+  (or (utils/get-syntax-schema this)
+      (utils/declare-syntax-schema!
+        this
+        (let [sp (soft-delay (map-spec this))
+              expl (soft-delay (map-explain this))]
+          (reify
+            prot/SchemaSyntax
+            (original-syntax [_] this)
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl))))))
 
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentMap
      :cljs cljs.core.PersistentArrayMap)
-  (spec [this] (map-spec this))
-  (explain [this] (map-explain this))
+  (spec [this] (-> this -map-schema spec))
+  (explain [this] (-> this -map-schema explain))
   #?(:cljs cljs.core.PersistentHashMap)
-  #?(:cljs (spec [this] (map-spec this)))
-  #?(:cljs (explain [this] (map-explain this))))
+  #?(:cljs (spec [this] (-> this -map-schema spec)))
+  #?(:cljs (explain [this] (-> this -map-schema explain))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -861,17 +1087,30 @@
 
 ;; A set schema is a Clojure set with a single element, a schema that all values must satisfy
 
+(defn- -set-schema [this]
+  (or (utils/get-syntax-schema this)
+      (do (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
+          (utils/declare-syntax-schema!
+            this
+            (let [sp (soft-delay
+                       (collection/collection-spec
+                         (spec/simple-precondition this set?)
+                         set
+                         [(collection/all-elements (first this))]
+                         (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))))
+                  expl (soft-delay #{(explain (first this))})]
+              (reify
+                prot/SchemaSyntax
+                (original-syntax [_] this)
+                Schema
+                (spec [_] @sp)
+                (explain [_] @expl)))))))
+
 (extend-protocol Schema
   #?(:clj clojure.lang.APersistentSet
      :cljs cljs.core.PersistentHashSet)
-  (spec [this]
-    (macros/assert! (= (count this) 1) "Set schema must have exactly one element")
-    (collection/collection-spec
-     (spec/simple-precondition this set?)
-     set
-     [(collection/all-elements (first this))]
-     (clojure.core/fn [_ xs _] (set (keep utils/error-val xs)))))
-  (explain [this] (set [(explain (first this))])))
+  (spec [this] (-> this -set-schema spec))
+  (explain [this] (-> this -set-schema explain)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Queue schemas
@@ -885,6 +1124,10 @@
        :cljs cljs.core/PersistentQueue)
    x))
 
+(def ^:private empty-queue
+  #?(:clj clojure.lang.PersistentQueue/EMPTY
+     :cljs cljs.core/PersistentQueue.EMPTY))
+
 (clojure.core/defn as-queue [col]
   (reduce
    conj
@@ -892,21 +1135,30 @@
       :cljs cljs.core/PersistentQueue.EMPTY)
    col))
 
-(macros/defrecord-schema Queue [schema]
-  Schema
-  (spec [this]
+(defrecord-cached-schema Queue [schema]
+  -Queue-spec
+  -Queue-explain)
+
+(defn- -Queue-spec [^Queue this]
+  (let [schema (.-schema this)]
     (collection/collection-spec
-     (spec/simple-precondition this queue?)
-     as-queue
-     [(collection/all-elements schema)]
-     (clojure.core/fn [_ xs _] (as-queue (keep utils/error-val xs)))))
-  (explain [this] (list 'queue (explain schema))))
+      (spec/simple-precondition this queue?)
+      as-queue
+      [(collection/all-elements schema)]
+      (clojure.core/fn [_ xs _] (as-queue (keep utils/error-val xs))))))
+
+(defn- -Queue-explain [^Queue this]
+  (let [schema (.-schema this)]
+    (list 'queue (explain schema))))
+
 
 (clojure.core/defn queue
   "Defines a schema satisfied by instances of clojure.lang.PersistentQueue
   (clj.core/PersistentQueue in ClojureScript) whose values satisfy x."
   [x]
-  (Queue. x))
+  (-> (Queue. x)
+      (-construct-cached-schema-record
+        'Queue -Queue-spec -Queue-explain)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Sequence Schemas
@@ -945,53 +1197,74 @@
      "schema that will match the remaining elements.")
     [(concat required optional) (first more)]))
 
-(extend-protocol Schema
-  #?(:clj clojure.lang.APersistentVector
-     :cljs cljs.core.PersistentVector)
-  (spec [this]
-    (collection/collection-spec
-     (spec/precondition
+;;TODO rename to -sequence-schema-pre-pred
+(defn- sequential-schema-pre-pred [x]
+  (or (nil? x) (sequential? x) #?(:clj (instance? java.util.List x))))
+
+(defn- -sequence-spec [this]
+  (collection/collection-spec
+    (spec/precondition
       this
       (clojure.core/fn [x] (or (nil? x) (sequential? x) #?(:clj (instance? java.util.List x))))
       #(list 'sequential? %))
-     vec
-     (let [[singles multi] (parse-sequence-schema this)]
-       (reduce
+    vec
+    (let [[singles multi] (parse-sequence-schema this)]
+      (reduce
         (clojure.core/fn [more ^One s]
           (if-not (.-optional? s)
             (cons
-             (collection/one-element
-              true (named (.-schema s) (.-name s))
-              (clojure.core/fn [item-fn x]
-                (if-let [x (seq x)]
-                  (do (item-fn (first x))
-                      (rest x))
-                  (do (item-fn
-                       (macros/validation-error
-                        (.-schema s) ::missing
-                        (list 'present? (.-name s))))
-                      nil))))
-             more)
+              (collection/one-element
+                true (named (.-schema s) (.-name s))
+                (clojure.core/fn [item-fn x]
+                  (if-let [x (seq x)]
+                    (do (item-fn (first x))
+                        (rest x))
+                    (do (item-fn
+                          (macros/validation-error
+                            (.-schema s) ::missing
+                            (list 'present? (.-name s))))
+                        nil))))
+              more)
             [(collection/optional-tail
-              (named (.-schema s) (.-name s))
-              (clojure.core/fn [item-fn x]
-                (when-let [x (seq x)]
-                  (item-fn (first x))
-                  (rest x)))
-              more)]))
+               (named (.-schema s) (.-name s))
+               (clojure.core/fn [item-fn x]
+                 (when-let [x (seq x)]
+                   (item-fn (first x))
+                   (rest x)))
+               more)]))
         (when multi
           [(collection/all-elements multi)])
         (reverse singles)))
-     (clojure.core/fn [_ elts extra]
-       (let [head (mapv utils/error-val elts)]
-         (cond-> head
-           (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))))
-  (explain [this]
-    (let [[singles multi] (parse-sequence-schema this)]
-      (cond-> (mapv (clojure.core/fn [^One s]
-                      (list (if (.-optional? s) 'optional 'one) (explain (:schema s)) (:name s)))
-                    singles)
-        multi (conj (explain multi))))))
+    (clojure.core/fn [_ elts extra]
+      (let [head (mapv utils/error-val elts)]
+        (cond-> head
+          (seq extra) (conj (utils/error-val (macros/validation-error nil extra (list 'has-extra-elts? (count extra))))))))))
+
+(defn- -sequence-explain [this]
+  (let [[singles multi] (parse-sequence-schema this)]
+    (cond-> (mapv (clojure.core/fn [^One s]
+                    (list (if (.-optional? s) 'optional 'one) (explain (:schema s)) (:name s)))
+                  singles)
+      multi (conj (explain multi)))))
+
+(defn- -sequence-schema [this]
+  (or (utils/get-syntax-schema this)
+      (utils/declare-syntax-schema!
+        this
+        (let [sp (soft-delay (-sequence-spec this))
+              expl (soft-delay (-sequence-explain this))]
+          (reify
+            prot/SchemaSyntax
+            (original-syntax [_] this)
+            Schema
+            (spec [_] @sp)
+            (explain [_] @expl))))))
+
+(extend-protocol Schema
+  #?(:clj clojure.lang.APersistentVector
+     :cljs cljs.core.PersistentVector)
+  (spec [this] (-> this -sequence-schema spec))
+  (explain [this] (-> this -sequence-schema explain)))
 
 (clojure.core/defn pair
   "A schema for a pair of schemas and their names"
@@ -1006,18 +1279,25 @@
 ;; also satisfy a map schema.  An optional :extra-validator-fn can also be attached to do
 ;; additional validation.
 
-(macros/defrecord-schema Record [klass schema]
-  Schema
-  (spec [this]
+(defrecord-cached-schema Record [klass schema]
+  -Record-spec
+  -Record-explain)
+
+(defn- -Record-spec [^Record this]
+  (let [klass (.-klass this)
+        schema (.-schema this)]
     (collection/collection-spec
-     (let [p (spec/precondition this #(instance? klass %) #(list 'instance? klass %))]
-       (if-let [evf (:extra-validator-fn this)]
-         (some-fn p (spec/precondition this evf #(list 'passes-extra-validation? %)))
-         p))
-     (:konstructor (meta this))
-     (map-elements schema)
-     (map-error)))
-  (explain [this]
+      (let [p (spec/precondition this #(instance? klass %) #(list 'instance? klass %))]
+        (if-let [evf (:extra-validator-fn this)]
+          (some-fn p (spec/precondition this evf #(list 'passes-extra-validation? %)))
+          p))
+      (:konstructor (meta this))
+      (map-elements schema)
+      (map-error))))
+
+(defn- -Record-explain [^Record this]
+  (let [klass (.-klass this)
+        schema (.-schema this)]
     (list 'record #?(:clj (or #?(:bb (when (instance? sci.lang.Type klass)
                                        (symbol (str klass))))
                               (symbol (.getName ^Class klass)))
@@ -1027,7 +1307,9 @@
 (clojure.core/defn record* [klass schema map-constructor]
   #?(:clj (macros/assert! (or (class? klass) #?(:bb (instance? sci.lang.Type klass))) "Expected record class, got %s" (utils/type-of klass)))
   (macros/assert! (map? schema) "Expected map, got %s" (utils/type-of schema))
-  (with-meta (Record. klass schema) {:konstructor map-constructor}))
+  (-> (with-meta (Record. klass schema) {:konstructor map-constructor})
+      (-construct-cached-schema-record
+        'Record -Record-spec -Record-explain)))
 
 #?(:clj
 (defmacro record
@@ -1065,10 +1347,16 @@
             (when (seq more)
               ['& (mapv explain more)]))))
 
-(macros/defrecord-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
-  Schema
-  (spec [this] (leaf/leaf-spec (spec/simple-precondition this ifn?)))
-  (explain [this]
+(defrecord-cached-schema FnSchema [output-schema input-schemas] ;; input-schemas sorted by arity
+  -Fn-spec
+  -Fn-explain)
+
+(defn- -Fn-spec [this]
+  (leaf/leaf-spec (spec/simple-precondition this ifn?)))
+
+(defn- -Fn-explain [^FnSchema this]
+  (let [output-schema (.-output-schema this)
+        input-schemas (.-input-schemas this)]
     (if (> (count input-schemas) 1)
       (list* '=>* (explain output-schema) (map explain-input-schema input-schemas))
       (list* '=> (explain output-schema) (explain-input-schema (first input-schemas))))))
@@ -1090,7 +1378,9 @@
   (macros/assert! (seq input-schemas) "Function must have at least one input schema")
   (macros/assert! (every? vector? input-schemas) "Each arity must be a vector.")
   (macros/assert! (apply distinct? (map arity input-schemas)) "Arities must be distinct")
-  (FnSchema. output-schema (sort-by arity input-schemas)))
+  (-> (FnSchema. output-schema (sort-by arity input-schemas))
+      (-construct-cached-schema-record
+        'Fn -Fn-spec -Fn-explain)))
 
 #?(:clj
 (defmacro =>*
@@ -1112,7 +1402,7 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Helpers for defining schemas (used in in-progress work, explanation coming soon)
+;;; Helpers for defining schemas
 
 (clojure.core/defn schema-with-name
   "Records name in schema's metadata."
@@ -1132,17 +1422,41 @@
   [schema]
   (-> schema meta :ns))
 
+(cc/defn ^:internal -defschema [{s :schema :keys [name nsym]}]
+  (let [name-schema #(vary-meta
+                       (schema-with-name % name)
+                       assoc :ns nsym)]
+    (name-schema
+      (if #?(:clj (instance? clojure.lang.IObj s)
+             :cljs (satisfies? IWithMeta s))
+        s
+        (or (utils/get-syntax-schema s)
+            (utils/declare-syntax-schema!
+              s
+              (let [;; these must be eager to avoid infinite loops
+                    sp (spec s)
+                    expl (explain s)]
+                (reify
+                  prot/SchemaSyntax
+                  (original-syntax [_] s)
+                  Schema
+                  (spec [_] sp)
+                  (explain [_] expl)))))))))
+
 #?(:clj
 (defmacro defschema
-  "Convenience macro to make it clear to reader that body is meant to be used as a schema.
-   The name of the schema is recorded in the metadata."
+  "Convenience macro to make it clear to the reader that body is meant to be used as a schema
+   that also precomputes parts of the Schema for performance.
+
+   The name of the schema is recorded in the metadata. If metadata is not supported on
+   the schema, will be wrapped in a Schema in order to attach the metadata. The wrapper
+   implements SchemaSyntax to recover the wrapped value."
   ([name form]
      `(defschema ~name "" ~form))
   ([name docstring form]
-     `(def ~name ~docstring
-        (vary-meta
-         (schema-with-name ~form '~name)
-         assoc :ns '~(ns-name *ns*))))))
+   `(def ~name ~docstring
+      (-defschema
+        {:schema ~form :name '~name :nsym '~(ns-name *ns*)})))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1369,16 +1683,16 @@
     `(let ~outer-bindings
        (let [ret# (clojure.core/defn ~(with-meta name {})
                     ~(assoc (apply dissoc standard-meta (when (macros/primitive-sym? tag) [:tag]))
-                       :doc (str
-                             (str "Inputs: " (if (= 1 (count raw-arglists))
-                                               (first raw-arglists)
-                                               (apply list raw-arglists)))
-                             (when-let [ret (when (= (second defn-args) :-) (nth defn-args 2))]
-                               (str "\n  Returns: " ret))
-                             (when doc (str  "\n\n  " doc)))
-                       :raw-arglists (list 'quote raw-arglists)
-                       :arglists (list 'quote arglists)
-                       :schema schema-form)
+                            :doc (str
+                                   (str "Inputs: " (if (= 1 (count raw-arglists))
+                                                     (first raw-arglists)
+                                                     (apply list raw-arglists)))
+                                   (when-let [ret (when (= (second defn-args) :-) (nth defn-args 2))]
+                                     (str "\n  Returns: " ret))
+                                   (when doc (str  "\n\n  " doc)))
+                            :raw-arglists (list 'quote raw-arglists)
+                            :arglists (list 'quote arglists)
+                            :schema schema-form)
                     ~@fn-body)]
          (utils/declare-class-schema! (utils/fn-schema-bearer ~name) ~schema-form)
          ret#)))))
@@ -1559,9 +1873,10 @@
         [doc-string? more-def-args] (if (= (count more-def-args) 2)
                                       (macros/maybe-split-first string? more-def-args)
                                       [nil more-def-args])
-        init (first more-def-args)]
+        init (first more-def-args)
+        schema-form (macros/extract-schema-form name)]
     (macros/assert! (= 1 (count more-def-args)) "Illegal args passed to schema def: %s" def-args)
-    `(let [output-schema# ~(macros/extract-schema-form name)]
+    `(let [output-schema# ~schema-form]
        (def ~name
          ~@(when doc-string? [doc-string?])
          (validate output-schema# ~init))))))
@@ -1573,3 +1888,16 @@
   "Sets the maximum length of value to be output before it is contracted to a prettier name."
   [max-length]
   (reset! utils/max-value-length max-length))
+
+(comment
+  (defschema Foo Integer)
+  (defschema Bar (nth (iterate #(vector #{%}) Integer) 1000))
+  (time (spec Foo))
+  (time (do (spec Bar) nil))
+  (time (do (nth (iterate #(vector #{%}) Integer) 1000) nil))
+  (class Foo)
+  (time (dotimes [_ 1000]
+          (spec Integer)))
+  (time (dotimes [_ 1000]
+          (spec [Foo])))
+  )

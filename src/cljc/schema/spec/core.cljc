@@ -61,38 +61,52 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Helpers
 
+(defn run-checker-info
+  [f return-walked? s]
+  (let [recursive-flag (volatile! false)
+        res (f
+             s
+             {:subschema-checker f
+              :return-walked? return-walked?
+              :cache #?(:clj (java.util.IdentityHashMap.) :cljs (atom {}))
+              :recursive-flag recursive-flag})]
+    {:checker res
+     :recursive @recursive-flag}))
+
 (defn run-checker
   "A helper to start a checking run, by setting the appropriate params.
    For examples, see schema.core/checker or schema.coerce/coercer."
   [f return-walked? s]
-  (f
-   s
-   {:subschema-checker f
-    :return-walked? return-walked?
-    :cache #?(:clj (java.util.IdentityHashMap.) :cljs (atom {}))}))
+  (:checker (run-checker-info f return-walked? s)))
 
-(defn with-cache [cache cache-key wrap-recursive-delay result-fn]
-  (if-let [w #?(:clj (.get ^java.util.Map cache cache-key)
-                :cljs (@cache cache-key))]
-    (if (= ::in-progress w) ;; recursive
-      (wrap-recursive-delay (delay #?(:clj (.get ^java.util.Map cache cache-key)
-                                      :cljs (@cache cache-key))))
-      w)
-    (do #?(:clj (.put ^java.util.Map cache cache-key ::in-progress)
-           :cljs (swap! cache assoc cache-key ::in-progress))
-        (let [res (result-fn)]
-          #?(:clj (.put ^java.util.Map cache cache-key res)
-             :cljs (swap! cache assoc cache-key res))
-          res))))
+(defn with-cache
+  ([cache cache-key wrap-recursive-delay result-fn]
+   (with-cache cache cache-key wrap-recursive-delay result-fn nil))
+  ([cache cache-key wrap-recursive-delay result-fn recursive-flag]
+   (if-let [w #?(:clj (.get ^java.util.Map cache cache-key)
+                 :cljs (@cache cache-key))]
+     (if (= ::in-progress w) ;; recursive
+       (do
+         (some-> recursive-flag (vreset! true))
+         (wrap-recursive-delay (delay #?(:clj (.get ^java.util.Map cache cache-key)
+                                         :cljs (@cache cache-key)))))
+       w)
+     (do #?(:clj (.put ^java.util.Map cache cache-key ::in-progress)
+            :cljs (swap! cache assoc cache-key ::in-progress))
+         (let [res (result-fn)]
+           #?(:clj (.put ^java.util.Map cache cache-key res)
+              :cljs (swap! cache assoc cache-key res))
+           res)))))
 
 (defn sub-checker
   "Should be called recursively on each subschema in the 'checker' method of a spec.
    Handles caching and error wrapping behavior."
   [{:keys [schema error-wrap]}
-   {:keys [subschema-checker cache] :as params}]
+   {:keys [subschema-checker cache recursive-flag] :as params}]
   (let [sub (with-cache cache schema
               (fn [d] (fn [x] (@d x)))
-              (fn [] (subschema-checker schema params)))]
+              (fn [] (subschema-checker schema params))
+              recursive-flag)]
     (if error-wrap
       (fn [x]
         (let [res (sub x)]
