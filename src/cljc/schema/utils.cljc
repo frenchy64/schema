@@ -169,6 +169,47 @@
   (defn class-schema [klass]
     (gobject/get klass "schema$utils$schema"))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for caching Schema's of classes and other non-IMeta's used for Schema syntax
+
+#?(:clj
+(let [^java.util.Map +id->syntax-schema+ (java.util.WeakHashMap.)]
+  (defn declare-syntax-schema!
+    "Cache the schema for primitive (non-IMeta) Schema syntax."
+    [id syntax-schema]
+    (when-not (class-schema syntax-schema)
+      (.put +id->syntax-schema+ id syntax-schema))
+    syntax-schema)
+
+  (defn get-syntax-schema
+    "The a syntax-schema for schema syntax id or nil."
+    [id]
+    (.get +id->syntax-schema+ id))))
+
+#?(:cljs
+(do
+  (defn declare-syntax-schema! [id syntax-schema]
+    (gobject/set id "schema$utils$syntax_schema" syntax-schema))
+
+  (defn get-syntax-schema [klass]
+    (gobject/get id "schema$utils$syntax_schema"))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Registry for fast class predicates
+
+#?(:clj
+   (let [class->pred (java.util.Collections/synchronizedMap (java.util.WeakHashMap.))]
+     (defn register-class-pred! [cls pred]
+       (when (class? cls)
+         (.put class->pred
+               cls
+               ;; predicates refer to the classes they test for
+               (java.lang.ref.WeakReference. pred)))
+       pred)
+     (defn get-class-pred [cls]
+       (or (when-some [^java.lang.ref.WeakReference ref (.get class->pred cls)]
+             (.get ref))
+           (register-class-pred! cls (eval `#(instance? ~cls %)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Utilities for fast-as-possible reference to use to turn fn schema validation on/off

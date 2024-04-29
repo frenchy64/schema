@@ -1751,3 +1751,20 @@
          (protocol-cache [_] :long))
        (testing "invalidates .__methodImplCache"
          (is (= :long (protocol-cache x) (call)))))))
+
+(comment
+  (s/validator Class)
+  (let [f (s/validator s/Int)]
+    (time
+      (dotimes [_ 1000000]
+        (f 1))))
+  (let [f #(instance? Class %)]
+    (time
+      (dotimes [_ 1000000]
+        (f Class))))
+  (let [cls Class
+        f #(instance? cls %)]
+    (time
+      (dotimes [_ 1000000]
+        (f Class))))
+)
