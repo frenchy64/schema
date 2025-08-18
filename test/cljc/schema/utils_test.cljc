@@ -26,4 +26,8 @@
 
     #(+ 1 2)
     #?(:clj #"schema\.utils-test.*"
-       :cljs #"function")))
+       :cljs #"function"))
+  #?(:clj
+     (testing "results are cached"
+       (is (identical? (utils/fn-name a-defn-function-with-a-normal-name)
+                       (utils/fn-name a-defn-function-with-a-normal-name))))))

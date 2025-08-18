@@ -1,4 +1,4 @@
-(defproject prismatic/schema "1.2.0"
+(defproject io.github.threatgrid/schema "1.2.1-cached-fn-name-SNAPSHOT"
   :description "Clojure(Script) library for declarative data description and validation"
   :url "http://github.com/plumatic/schema"
   :license {:name "Eclipse Public License"

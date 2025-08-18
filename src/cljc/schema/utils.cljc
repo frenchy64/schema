@@ -58,21 +58,31 @@
        (sort-by #(- (count (second %))))
        (reduce (fn [^String s [to from]] (string/replace s from (str to))) s))))
 
+#?(:clj
+(let [^java.util.Map +unmunged-name+ (java.util.WeakHashMap.)]
+  (defn fn-name
+    "A meaningful name for a function that looks like its symbol, if applicable."
+    [f]
+    (or (.get +unmunged-name+ f)
+        (let [s (.getName (class f))
+              slash (.lastIndexOf s "$")
+              raw (unmunge
+                    (if (>= slash 0)
+                      (str (subs s 0 slash) "/" (subs s (inc slash)))
+                      s))
+              res (string/replace raw #"^clojure.core/" "")]
+          (locking +unmunged-name+
+            (.put +unmunged-name+ f res))
+          res)))))
+
+#?(:cljs
 (defn fn-name
   "A meaningful name for a function that looks like its symbol, if applicable."
   [f]
-  #?(:cljs
-     (let [[_ s] (re-matches #"#object\[(.*)\]" (pr-str f))]
-       (if (= "Function" s)
-         "function"
-         (->> s demunge (re-find #"[^/]+(?:$|(?=/+$))"))))
-     :clj (let [s (.getName (class f))
-                slash (.lastIndexOf s "$")
-                raw (unmunge
-                      (if (>= slash 0)
-                        (str (subs s 0 slash) "/" (subs s (inc slash)))
-                        s))]
-            (string/replace raw #"^clojure.core/" ""))))
+  (let [[_ s] (re-matches #"#object\[(.*)\]" (pr-str f))]
+    (if (= "Function" s)
+      "function"
+      (->> s demunge (re-find #"[^/]+(?:$|(?=/+$))"))))))
 
 (defn record? [x]
   #?(:clj (instance? clojure.lang.IRecord x)
